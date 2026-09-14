@@ -381,7 +381,7 @@ def optimize(
 #
 # Mosaic's canonical `optimization/topopt` run uses `corner_load=True`; we additionally
 # run the uniform full-face load for comparison.
-# We use the settings from Figure 32 of {cite}`top-rehmann2026mosaic`, which uses a 32x4x16 mesh.
+# We use the settings from the benchmark website to enable a suitable runtime for the optimization.
 #
 # `trust-constr` logs a row per iteration, so this cell carries the `output_scroll` tag:
 # the log is rendered as a scroll box instead of several screens of text.
@@ -389,7 +389,7 @@ def optimize(
 # + tags=["output_scroll"]
 results = []
 for corner_load in [True, False]:
-    Jhat, problem, compliance, rho, timings = run_topopt(corner_load, nx=32, ny=4, nz=16)
+    Jhat, problem, compliance, rho, timings = run_topopt(corner_load, nx=16, ny=2, nz=8)
     result = optimize(rho, Jhat, problem, compliance, corner_load)
     result.update(timings)
     results.append(result)
