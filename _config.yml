@@ -11,7 +11,10 @@ only_build_toc_files: true
 # See https://jupyterbook.org/content/execute.html
 execute:
   execute_notebooks: cache
-  timeout: 600
+  # Per cell. The topology optimization demo runs two `trust-constr` solves in one cell,
+  # each taking ~5 minutes on a CI runner; at 600 s that cell was killed part-way through,
+  # which silently dropped every output after it (plots included).
+  timeout: 1800
 
 # Information about where the book exists on the web
 repository:
