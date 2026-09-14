@@ -1,7 +1,5 @@
 import typing
 
-from mpi4py import MPI
-
 import dolfinx
 import numpy
 import numpy.typing as npt
@@ -9,7 +7,7 @@ import ufl
 from pyadjoint.overloaded_type import create_overloaded_object
 from pyadjoint.tape import annotate_tape, get_working_tape, stop_annotating
 
-from .blocks.assembly import AssembleBlock
+from .blocks.assembly import AssembleBlock, assemble_real_scalar
 
 
 def assemble_scalar(form: ufl.Form, **kwargs):
@@ -35,10 +33,7 @@ def assemble_scalar(form: ufl.Form, **kwargs):
             entity_maps=kwargs.pop("entity_maps", None),
         )
 
-        local_output = dolfinx.fem.assemble_scalar(compiled_form)
-        comm = compiled_form.mesh.comm
-        output = comm.allreduce(local_output, op=MPI.SUM)
-        assert isinstance(output, float)
+        output = assemble_real_scalar(compiled_form)
 
     output = create_overloaded_object(output)
 

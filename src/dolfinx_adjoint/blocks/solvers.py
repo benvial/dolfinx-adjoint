@@ -14,7 +14,7 @@ import pyadjoint
 import ufl
 
 from ..compat import bcs_by_block
-from ..types import Function
+from ..types import Function, RealLifted
 from ..typing_utils import MaybeBlocked, MaybeBlockedMatrix, NestedSequence
 from ..ufl_utils import assign_mixed_parts, sum_form
 from .assembly import _create_vector, _SpecialVector, _vector, assemble_compiled_form
@@ -41,6 +41,22 @@ def collect_coefficients(form: ufl.BaseForm | typing.Sequence | None) -> set[Fun
     for f in form:
         coefficients |= collect_coefficients(f)
     return coefficients
+
+
+def _reject_real_lifted_unknown(u: MaybeBlocked[Function]) -> None:
+    """Enforce the leaf-only invariant on {py:class}`~dolfinx_adjoint.types.RealLifted`.
+
+    A ``RealLifted`` must be a tape leaf (user-supplied Control data), never a Block's own
+    output -- ``evaluate_adj_component`` gates the ``2*Re[...]`` sensitivity extraction on
+    ``isinstance(c_rep, RealLifted)`` and assumes that every such dependency is a terminal
+    gradient target, never a mid-chain adjoint seed. Passing one as a Problem's ``u=`` would
+    break that assumption, so it is rejected here.
+    """
+    u_list = u if isinstance(u, list) else [u]
+    if any(isinstance(ui, RealLifted) for ui in u_list):
+        raise RuntimeError(
+            "RealLifted is a leaf-only control and must not be used as a Problem's unknown u."
+        )
 
 
 def _map_block_variables_to_form(
@@ -603,6 +619,12 @@ class _ProblemBlockBase(pyadjoint.Block, abc.ABC):
         vec = _create_vector(compiled_sensitivity, sensitivity.arguments()[0].ufl_function_space())
         vec.array[:] = 0.0
         assemble_compiled_form(compiled_sensitivity, tensor=vec)
+        if isinstance(c_rep, RealLifted):
+            # ufl.adjoint()+ufl.action() above compute a genuinely complex Hermitian
+            # pairing; the gradient of a real Functional w.r.t. a real (Real-lifted)
+            # parameter is its real part doubled (standard adjoint theory for a real
+            # parameter: dJ/dm = 2*Re[lambda^H . dR/dm]).
+            vec.array[:] = 2.0 * vec.array.real
         return vec
 
     def prepare_recompute_component(
@@ -1145,6 +1167,7 @@ class LinearProblemBlock(_ProblemBlockBase):
                 self._u = [Function(Li.arguments()[0].ufl_function_space()) for Li in L]  # type: ignore[union-attr]
         else:
             self._u = [pyadjoint.create_overloaded_object(ui) for ui in u]
+        _reject_real_lifted_unknown(self._u)
 
         # NOTE: Add mesh and constants as dependencies later on
 
@@ -1409,6 +1432,7 @@ class NonlinearProblemBlock(_ProblemBlockBase):
             assert isinstance(F, typing.Iterable)
             replace_dict = {ui: _ui for ui, _ui in zip(u, self._u)}
             self._rhs = [ufl.replace(Fi, replace_dict) for Fi in F]
+        _reject_real_lifted_unknown(self._u)
         # Kept only for _rebuild_problem() -- see NonlinearProblem.__init__'s
         # own self._user_J for why this must never be read for anything else.
         self._user_J = J

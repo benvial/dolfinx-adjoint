@@ -10,7 +10,7 @@ from .checkpointing import enable_disk_checkpointing
 from .function import assign
 from .interpolation import interpolate, interpolate_nonmatching
 from .solvers import LinearProblem, NonlinearProblem
-from .types import Constant, Function, dirichletbc
+from .types import Constant, Function, RealLifted, dirichletbc
 
 meta = metadata("dolfinx_adjoint")
 __version__ = meta.get("Version")
@@ -26,6 +26,7 @@ _pyad.continue_annotation()
 __all__ = [
     "Constant",
     "Function",
+    "RealLifted",
     "dirichletbc",
     "LinearProblem",
     "NonlinearProblem",

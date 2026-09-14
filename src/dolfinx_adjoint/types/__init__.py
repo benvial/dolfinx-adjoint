@@ -1,4 +1,4 @@
-__all__ = ["Function", "Constant", "dirichletbc"]
+__all__ = ["Function", "Constant", "RealLifted", "dirichletbc"]
 
 from .dirichletbc import dirichletbc
-from .function import Constant, Function
+from .function import Constant, Function, RealLifted

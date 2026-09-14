@@ -336,5 +336,54 @@ class Constant(Function):
         return cls(obj.function_space.mesh, obj.x.array[:])
 
 
+@attach_ufl_id
+class RealLifted(Function):
+    """A real-valued Control represented as a complex-valued {py:class}`Function` whose
+    imaginary part is identically zero, so it can appear in the same form as a
+    complex-valued state without tripping DOLFINx's restriction against mixing
+    real- and complex-dtype Functions in one form (tracked upstream as FEniCS/dolfinx#3880).
+    This is a deliberate workaround for that restriction, not the eventual design --
+    once dolfinx supports mixed dtypes natively the lift may no longer be necessary.
+
+    Leaf-only: a {py:class}`RealLifted` must be user-supplied data (e.g. a Control), never
+    the recorded output of a {py:class}`~dolfinx_adjoint.solvers.LinearProblem` or
+    {py:class}`~dolfinx_adjoint.solvers.NonlinearProblem` solve -- the adjoint code paths
+    that key off ``isinstance(c_rep, RealLifted)`` assume every occurrence is a terminal
+    gradient target, not an intermediate adjoint seed. Passing one as a Problem's ``u=``
+    is rejected at construction time.
+
+    Args:
+        V: The function space of the function. Must carry a complex scalar dtype.
+        x: Optional vector to initialize the function with. Its imaginary part must
+            already be identically zero.
+        name: Optional name for the function.
+        dtype: Data type of the function values, defaults to `dolfinx.default_scalar_type`.
+            Must be a complex dtype.
+
+    Raises:
+        TypeError: If ``dtype`` is not a complex dtype.
+        ValueError: If ``x`` is provided with a non-zero imaginary part.
+    """
+
+    def __init__(
+        self,
+        V: dolfinx.fem.FunctionSpace,
+        x: dolfinx.la.Vector | None = None,
+        name: str | None = None,
+        dtype: npt.DTypeLike = dolfinx.default_scalar_type,
+        ufl_id: int | None = None,
+    ):
+        if not numpy.issubdtype(dtype, numpy.complexfloating):
+            raise TypeError(
+                f"RealLifted requires a complex scalar dtype (got {dtype}); it represents a "
+                "real-valued control lifted into a complex Function with an identically-zero "
+                "imaginary part."
+            )
+        super().__init__(V, x=x, name=name, dtype=dtype, ufl_id=ufl_id)
+        if not numpy.allclose(self.x.array.imag, 0.0):
+            raise ValueError("RealLifted requires a Function whose imaginary part is identically zero.")
+
+
 register_overloaded_type(Function, (dolfinx.fem.Function, Function))
 register_overloaded_type(Constant, (dolfinx.fem.Constant, Constant))
+register_overloaded_type(RealLifted, (RealLifted,))
