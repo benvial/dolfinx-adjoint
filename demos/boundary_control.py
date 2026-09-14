@@ -184,10 +184,6 @@ marker_names = {
     float(obstacle_marker): "Obstacle (control)",
 }
 
-# `window_size` also fixes the width of the iframe pyvista embeds in the rendered
-# documentation, so it is kept inside the article column (~700 px); the exported scene is
-# re-rendered client side at the iframe's size, and a wider request is cropped, not scaled.
-# Each of the two panels is then 700x255, matching this channel's 3:1 geometry.
 plotter = pyvista.Plotter(shape=(2, 1), window_size=[700, 510])
 plotter.subplot(0, 0)
 plotter.add_text("Mesh", font_size=10)

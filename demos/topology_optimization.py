@@ -356,9 +356,7 @@ def optimize(
     final_compliance = dolfinx_adjoint.assemble_scalar(ufl.action(L, uh), annotate=False)
     final_vol_frac = dolfinx_adjoint.assemble_scalar(rho * ufl.dx, annotate=False) / (Lx * Ly * Lz)
 
-    # The converged density field. The scene is returned rather than shown here: this
-    # function runs inside a cell whose (long) output is scrolled, and a 3D view is no use
-    # inside a scroll box.
+    # The converged density field.
     grid = pyvista.UnstructuredGrid(*dolfinx.plot.vtk_mesh(msh))
     grid.cell_data["rho"] = rho.x.array
     filtered_grid = grid.threshold(0.5, scalars="rho")
