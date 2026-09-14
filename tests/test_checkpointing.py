@@ -134,7 +134,7 @@ def _tape_heat_equation(V, n_steps, schedule=None, disk=False, use_mpio=None):
     # schedule would read whatever value happens to be in uh at replay time instead of the
     # checkpointed one. The state update is therefore an explicit, tape-recorded assignment,
     # matching _tape_snes_heat_equation below.
-    F = ((u - u_prev) / dt * v + nu * ufl.inner(ufl.grad(u), ufl.grad(v)) - f * v) * ufl.dx
+    F = (ufl.inner((u - u_prev) / dt, v) + nu * ufl.inner(ufl.grad(u), ufl.grad(v)) - ufl.inner(f, v)) * ufl.dx
     a, L = ufl.system(F)
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
@@ -234,7 +234,7 @@ def _tape_bc_control_heat_equation(V, n_steps, schedule=None, disk=False):
     v = ufl.TestFunction(V)
     uh = dolfinx_adjoint.Function(V, name="solution")
     u_prev = dolfinx_adjoint.Function(V, name="previous")
-    F = ((u - u_prev) / dt * v + nu * ufl.inner(ufl.grad(u), ufl.grad(v))) * ufl.dx
+    F = (ufl.inner((u - u_prev) / dt, v) + nu * ufl.inner(ufl.grad(u), ufl.grad(v))) * ufl.dx
     a, L = ufl.system(F)
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
@@ -395,7 +395,7 @@ def _tape_snes_heat_equation(V, n_steps, schedule=None, solution_dependent_diffu
     u_prev = dolfinx_adjoint.Function(V, name="previous")
 
     nu = (1 + uh**2) if solution_dependent_diffusivity else 1.0
-    F = ((uh - u_prev) / dt * v + nu * ufl.inner(ufl.grad(uh), ufl.grad(v)) - f * v) * ufl.dx
+    F = (ufl.inner((uh - u_prev) / dt, v) + nu * ufl.inner(ufl.grad(uh), ufl.grad(v)) - ufl.inner(f, v)) * ufl.dx
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)

@@ -203,7 +203,7 @@ def test_poisson_mother(cell_type: dolfinx.mesh.CellType, linear_solver: bool):
     uh = Function(V, name="State")
     u = ufl.TrialFunction(V)
     v = ufl.TestFunction(V)
-    F = ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx - f * v * ufl.dx
+    F = ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx - ufl.inner(f, v) * ufl.dx
     if not linear_solver:
         F = ufl.replace(F, {u: uh})
     tdim = mesh.topology.dim

@@ -292,7 +292,11 @@ def test_time_dependent_bc_replay():
     u_prev = Function(V, name="state_prev")
     assign(0.0, u_prev)
 
-    F = (u - u_prev) / dt * v * ufl.dx + ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx - m * v * ufl.dx
+    F = (
+        ufl.inner((u - u_prev) / dt, v) * ufl.dx
+        + ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
+        - ufl.inner(m, v) * ufl.dx
+    )
     a, L = ufl.system(F)
 
     bc_func = Function(V, name="bc_func")

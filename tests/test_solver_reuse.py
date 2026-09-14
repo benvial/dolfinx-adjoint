@@ -41,7 +41,11 @@ def _run_heat_steps(num_steps: int, monkeypatch) -> int:
     uh = Function(V, name="state")
     u_prev = Function(V, name="state_prev")
 
-    F = (u - u_prev) / dt * v * ufl.dx + ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx - m * v * ufl.dx
+    F = (
+        ufl.inner((u - u_prev) / dt, v) * ufl.dx
+        + ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
+        - ufl.inner(m, v) * ufl.dx
+    )
     a, L = ufl.system(F)
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
@@ -128,7 +132,7 @@ def test_recompute_does_not_corrupt_original_control():
 
     f = dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(1.0))
     a = m * ufl.inner(ufl.grad(u_trial), ufl.grad(v)) * ufl.dx
-    L = f * v * ufl.dx
+    L = ufl.inner(f, v) * ufl.dx
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
@@ -191,7 +195,7 @@ def test_nonlinear_recompute_does_not_corrupt_original_control():
     u1 = Function(V, name="state")
     u1.interpolate(lambda x: np.ones_like(x[0]))
     v1 = ufl.TestFunction(V)
-    F1 = (1 + u1**2) * ufl.inner(ufl.grad(u1), ufl.grad(v1)) * ufl.dx - f * v1 * ufl.dx
+    F1 = (1 + u1**2) * ufl.inner(ufl.grad(u1), ufl.grad(v1)) * ufl.dx - ufl.inner(f, v1) * ufl.dx
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
@@ -257,7 +261,7 @@ def test_linear_adjoint_lhs_compiled_once():
 
     f = dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(1.0))
     a = m * ufl.inner(ufl.grad(u_trial), ufl.grad(v)) * ufl.dx
-    L = f * v * ufl.dx
+    L = ufl.inner(f, v) * ufl.dx
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
@@ -315,7 +319,7 @@ def test_nonlinear_adjoint_lhs_compiled_once():
     u1 = Function(V, name="state")
     u1.interpolate(lambda x: np.ones_like(x[0]))
     v1 = ufl.TestFunction(V)
-    F1 = (1 + u1**2) * ufl.inner(ufl.grad(u1), ufl.grad(v1)) * ufl.dx - f * v1 * ufl.dx
+    F1 = (1 + u1**2) * ufl.inner(ufl.grad(u1), ufl.grad(v1)) * ufl.dx - ufl.inner(f, v1) * ufl.dx
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
@@ -382,7 +386,7 @@ def test_tlm_rhs_templates_compiled_once():
 
     f = dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(1.0))
     a = m * ufl.inner(ufl.grad(u_trial), ufl.grad(v)) * ufl.dx
-    L = f * v * ufl.dx
+    L = ufl.inner(f, v) * ufl.dx
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
@@ -452,7 +456,7 @@ def test_tlm_skips_inactive_dependency_with_singular_derivative():
     m.interpolate(lambda x: 1.0 + x[0] ** 2 + x[1] ** 2)
 
     a = (1.0 + ufl.sqrt(c)) * ufl.inner(ufl.grad(u_trial), ufl.grad(v)) * ufl.dx
-    L = m * v * ufl.dx
+    L = ufl.inner(m, v) * ufl.dx
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
@@ -507,7 +511,7 @@ def test_nonlinear_tlm_rhs_templates_compiled_once():
     u1 = Function(V, name="state")
     u1.interpolate(lambda x: np.ones_like(x[0]))
     v1 = ufl.TestFunction(V)
-    F1 = (1 + u1**2) * ufl.inner(ufl.grad(u1), ufl.grad(v1)) * ufl.dx - f * v1 * ufl.dx
+    F1 = (1 + u1**2) * ufl.inner(ufl.grad(u1), ufl.grad(v1)) * ufl.dx - ufl.inner(f, v1) * ufl.dx
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
@@ -628,7 +632,7 @@ def test_nonlinear_problem_released_by_refcounting_not_gc():
     u1 = Function(V, name="state")
     u1.interpolate(lambda x: np.ones_like(x[0]))
     v1 = ufl.TestFunction(V)
-    F1 = (1 + u1**2) * ufl.inner(ufl.grad(u1), ufl.grad(v1)) * ufl.dx - f * v1 * ufl.dx
+    F1 = (1 + u1**2) * ufl.inner(ufl.grad(u1), ufl.grad(v1)) * ufl.dx - ufl.inner(f, v1) * ufl.dx
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
@@ -735,7 +739,7 @@ def test_nonlinear_problem_rebuilt_after_garbage_collection():
     u1 = Function(V, name="state")
     u1.interpolate(lambda x: np.ones_like(x[0]))
     v1 = ufl.TestFunction(V)
-    F1 = (1 + u1**2) * ufl.inner(ufl.grad(u1), ufl.grad(v1)) * ufl.dx - f * v1 * ufl.dx
+    F1 = (1 + u1**2) * ufl.inner(ufl.grad(u1), ufl.grad(v1)) * ufl.dx - ufl.inner(f, v1) * ufl.dx
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)

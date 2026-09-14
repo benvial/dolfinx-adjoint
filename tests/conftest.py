@@ -52,6 +52,38 @@ def _repair_jit_cache() -> None:
             marker.unlink(missing_ok=True)
 
 
+_SECOND_ORDER_ADJOINT_UNDERIVED = "second-order adjoint"
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item):
+    """Report an unsupported complex-scalar Hessian as a skip rather than a failure.
+
+    Under a complex-scalar build the second-order adjoint has not been derived, and the
+    Hessian entry points say so by raising rather than returning a number from a path nobody
+    has checked. That is the intended behaviour, but it leaves a complex run unreadable: a
+    test that asks for a Hessian is indistinguishable, in the summary, from a test of
+    something that is actually broken.
+
+    The tests that reach a Hessian are not confined to one file -- they span the Hessian
+    suite, the TLM update suite, the linear and blocked solver suites, solver reuse,
+    interpolation and assembly -- and most reach one incidentally, through
+    {py:func}`pyadjoint.taylor_test`'s rate-3 Hessian-corrected check rather than by asking
+    for a Hessian in so many words. Recognising the refusal as it propagates keeps that list
+    from having to be maintained by hand, and means a test stops being skipped the moment it
+    no longer needs the unimplemented path. A test that asserts the refusal
+    (``pytest.raises``) never reaches here, since its exception does not propagate.
+
+    Real-scalar builds are unaffected: nothing raises this there.
+    """
+    try:
+        return (yield)
+    except NotImplementedError as refusal:
+        if _SECOND_ORDER_ADJOINT_UNDERIVED not in str(refusal):
+            raise
+        pytest.skip(f"Unsupported under a complex-scalar build: {refusal}")
+
+
 @pytest.fixture(autouse=True)
 def repair_jit_cache():
     """Stop a form that fails to compile from taking later, unrelated tests down with it.

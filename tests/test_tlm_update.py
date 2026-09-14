@@ -68,7 +68,10 @@ def _viscous_stokes(mesh):
         [ufl.inner(mu * ufl.grad(u), ufl.grad(v)) * dx, ufl.inner(p, ufl.div(v)) * dx],
         [ufl.inner(q, ufl.div(u)) * dx, None],
     ]
-    L = [ufl.inner(f, v) * dx, dolfinx.fem.Constant(mesh, 0.0) * q * dx]
+    L = [
+        ufl.inner(f, v) * dx,
+        ufl.inner(dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(0.0)), q) * dx,
+    ]
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)

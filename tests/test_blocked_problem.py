@@ -57,7 +57,7 @@ def test_solver(use_mixed_space: bool, mesh_2D, assert_hessian_matches_finite_di
         return ufl.inner(f, v) * dx
 
     def L1(mesh, q):
-        return dolfinx.fem.Constant(mesh, 0.0) * q * dx
+        return ufl.inner(dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(0.0)), q) * dx
 
     Z = dolfinx.fem.functionspace(mesh, ("DG", 0, (mesh.geometry.dim,)))
     f = Function(Z, name="control")
@@ -456,7 +456,10 @@ def test_blocked_dirichletbc_control_on_second_block(mesh_2D):
         [ufl.inner(ufl.grad(u0), ufl.grad(v0)) * dx, None],
         [None, ufl.inner(ufl.grad(u1), ufl.grad(v1)) * dx],
     ]
-    L = [ufl.inner(f, v0) * dx, ufl.inner(dolfinx.fem.Constant(mesh, 0.0), v1) * dx]
+    L = [
+        ufl.inner(f, v0) * dx,
+        ufl.inner(dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(0.0)), v1) * dx,
+    ]
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
