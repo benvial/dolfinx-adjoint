@@ -636,15 +636,22 @@ class MatrixFreeInterpolationOperator:
         v_out.array[: self.num_rows_local] += y_local
 
     def mult_transpose(self, v_in: dolfinx.la.Vector, v_out: dolfinx.la.Vector, accumulate: bool = False):
-        """Adjoint action: A^T * v_in -> v_out (Pullback)"""
+        """Adjoint action: A^H * v_in -> v_out (Pullback)"""
         v_in.scatter_forward()
 
         # Extract corresponding target DOFs. Direct slice!
         y_in = v_in.array[: self.num_rows_local]
 
-        # Scale every coefficient row by the target DOF value
+        # Conjugated, because the adjoint of a complex operator is its *Hermitian* transpose
+        # and that is the convention every seed in this package is carried in (ufl.adjoint,
+        # dolfinx.cpp.la.inner_product, the rank-0 Wirtinger seed). The operator's entries are
+        # complex whenever the interpolated expression carries a complex coefficient, e.g.
+        # interpolate(alpha * u, W); a plain transpose would return a seed conjugated relative
+        # to everything downstream, which the terminal `2*Re[.]` cannot repair. On a
+        # real-valued operator -- every real build, and a complex build whose expression has
+        # no complex coefficient -- conjugation is a no-op.
         # scaled_A shape: (num_local_Q, num_v_per_cell)
-        scaled_A = self.A_reduced * y_in[:, None]
+        scaled_A = self.A_reduced.conj() * y_in[:, None]
 
         if not accumulate:
             v_out.array[:] = 0.0

@@ -302,6 +302,40 @@ def test_gradient_through_an_interpolation_step_matches_finite_difference(mesh, 
     del problem
 
 
+def test_gradient_through_a_complex_coefficient_interpolation_matches_finite_difference(mesh, V, target):
+    """An interpolated *expression* carrying a complex coefficient.
+
+    Unlike interpolation between two spaces, which is a real linear map, the operator behind
+    `interpolate(alpha * uh, W)` has genuinely complex entries. Its adjoint action is then the
+    Hermitian transpose, not the plain one -- a plain transpose returns a seed conjugated
+    relative to every other seed in the package, which the terminal `2*Re[.]` cannot repair.
+    """
+    pyadjoint.get_working_tape().clear_tape()
+    rng = np.random.default_rng(6)
+
+    W = dolfinx.fem.functionspace(mesh, ("Lagrange", 2))
+    target_W = dolfinx.fem.Function(W)
+    target_W.interpolate(target)
+    alpha = dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(2.0 + 1.0j))  # type: ignore[arg-type]
+
+    f = Function(V, name="control")
+    f.x.array[:] = rng.uniform(-1.0, 1.0, size=f.x.array.shape)
+    f.x.scatter_forward()
+
+    problem, uh = _solve_helmholtz(mesh, V, f)
+    J = assemble_scalar(ufl.inner(interpolate(alpha * uh, W), target_W) * ufl.dx)
+
+    Jhat = pyadjoint.ReducedFunctional(J, pyadjoint.Control(f))
+
+    h = Function(V)
+    h.x.array[:] = rng.uniform(-1.0, 1.0, size=h.x.array.shape)
+    h.x.scatter_forward()
+
+    dJdm = Jhat.derivative()._ad_dot(h)
+    assert np.isclose(dJdm, _finite_difference(Jhat, f, h, J), rtol=1e-6, atol=1e-8)
+    del problem
+
+
 def test_hessian_is_refused_under_complex_scalars(mesh, V, target):
     pyadjoint.get_working_tape().clear_tape()
 
