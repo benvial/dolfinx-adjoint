@@ -162,6 +162,17 @@ def reference_solution(
     return J_org, dJac_dm, Hm_dm, functional_values
 
 
+@pytest.mark.skipif(
+    np.issubdtype(dolfinx.default_scalar_type, np.complexfloating),
+    reason=(
+        "The reference solution above hand-derives the adjoint, the TLM and the second-order "
+        "adjoint with real-mode form conventions: it differentiates a non-holomorphic misfit "
+        "in one direction and pairs forms without conjugation, both of which UFL rejects under "
+        "a complex build. Porting it would mean reimplementing the library's complex adjoint "
+        "inside its own reference, which would stop it being an independent check -- and the "
+        "second-order half of what it compares has not been derived for complex scalars anyway."
+    ),
+)
 @pytest.mark.parametrize("linear_solver", [True, False])
 @pytest.mark.parametrize("cell_type", [dolfinx.mesh.CellType.triangle, dolfinx.mesh.CellType.quadrilateral])
 def test_poisson_mother(cell_type: dolfinx.mesh.CellType, linear_solver: bool):

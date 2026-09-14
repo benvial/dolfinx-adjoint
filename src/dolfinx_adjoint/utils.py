@@ -1,3 +1,4 @@
+import contextlib
 import typing
 from functools import singledispatchmethod
 
@@ -124,8 +125,12 @@ class Floatify(DAGTraverser):
         return operands[0] * operands[1]
 
 
-def scalar_type_mismatch_message(form: ufl.Form) -> str | None:
+def scalar_type_mismatch_message(form: typing.Any) -> str | None:
     """Describe a real/complex dtype mismatch among a form's coefficients, if there is one.
+
+    Accepts a single form or any nesting of forms -- a blocked problem's ``a`` is a list of
+    lists, whose entries may be ``None`` -- and considers every coefficient across them, since
+    it is their coexistence in one assembly that fails.
 
     DOLFINx cannot assemble a form whose coefficients do not share one scalar dtype: its
     nanobind bindings are templated on a fixed set of ``(scalar, geometry)`` dtype pairs, so
@@ -156,14 +161,23 @@ def scalar_type_mismatch_message(form: ufl.Form) -> str | None:
         name = getattr(obj, "name", None) or repr(obj)
         by_dtype.setdefault(dtype, []).append(str(name))
 
-    for coefficient in ufl.algorithms.extract_coefficients(form):
-        record(coefficient)
-    try:
-        constants = ufl.algorithms.analysis.extract_constants(form)
-    except AttributeError:  # pragma: no cover - depends on the installed UFL version
-        constants = []
-    for constant in constants:
-        record(constant)
+    def record_form(candidate) -> None:
+        if candidate is None:
+            return
+        if not isinstance(candidate, ufl.Form):
+            for nested in candidate:
+                record_form(nested)
+            return
+        for coefficient in ufl.algorithms.extract_coefficients(candidate):
+            record(coefficient)
+        try:
+            constants = ufl.algorithms.analysis.extract_constants(candidate)
+        except AttributeError:  # pragma: no cover - depends on the installed UFL version
+            constants = []
+        for constant in constants:
+            record(constant)
+
+    record_form(form)
 
     kinds = {numpy.issubdtype(dtype, numpy.complexfloating) for dtype in by_dtype}
     if len(kinds) < 2:
@@ -318,3 +332,19 @@ def wirtinger_derivative_forms(
         _derivative_along(form, coefficient, argument, argument),
         _derivative_along(form, coefficient, 1j * argument, argument),
     )
+
+
+@contextlib.contextmanager
+def _explaining_scalar_type_mismatch(form: typing.Any) -> typing.Iterator[None]:
+    """Re-raise a dtype-mix failure from DOLFINx with a message naming the coefficients.
+
+    See {py:func}`scalar_type_mismatch_message` for why the original error names neither.
+    Anything else raised inside the block is left alone.
+    """
+    try:
+        yield
+    except (TypeError, RuntimeError) as error:
+        hint = scalar_type_mismatch_message(form)
+        if hint is None:
+            raise
+        raise type(error)(f"{hint}\n\nOriginal error: {error}") from error

@@ -25,6 +25,7 @@ from .ufl_utils import (
     recursive_replace,
     sum_form,
 )
+from .utils import _explaining_scalar_type_mismatch
 
 # A counter incremented once per Problem construction is deterministic
 # and identical on every rank, since construction happens in lock-step
@@ -938,19 +939,23 @@ class LinearProblem(_ProblemBase, dolfinx.fem.petsc.LinearProblem):
             c: dolfinx.fem.Function(c.function_space) for c in sorted_coefficients
         }
         a_R, L_R, P_R = recursive_replace((a, L, P), self._value_placeholders)  # type: ignore[misc]
-        super().__init__(
-            a=a_R,  # type: ignore[arg-type]
-            L=L_R,  # type: ignore[arg-type]
-            bcs=bcs,
-            u=self._u,  # type: ignore[arg-type]
-            P=P_R,  # type: ignore[arg-type]
-            kind=kind,  # type: ignore[arg-type]
-            petsc_options_prefix=petsc_options_prefix,
-            petsc_options=petsc_options,
-            form_compiler_options=form_compiler_options,
-            jit_options=jit_options,
-            entity_maps=entity_maps,
-        )  # type: ignore[misc]
+        # The forms are compiled here, so this is where a coefficient carrying the wrong
+        # scalar dtype first fails -- several layers down, naming neither dtype nor
+        # coefficient. See {py:func}`dolfinx_adjoint.utils.scalar_type_mismatch_message`.
+        with _explaining_scalar_type_mismatch((a_R, L_R, P_R)):
+            super().__init__(
+                a=a_R,  # type: ignore[arg-type]
+                L=L_R,  # type: ignore[arg-type]
+                bcs=bcs,
+                u=self._u,  # type: ignore[arg-type]
+                P=P_R,  # type: ignore[arg-type]
+                kind=kind,  # type: ignore[arg-type]
+                petsc_options_prefix=petsc_options_prefix,
+                petsc_options=petsc_options,
+                form_compiler_options=form_compiler_options,
+                jit_options=jit_options,
+                entity_maps=entity_maps,
+            )  # type: ignore[misc]
 
         # Match the adjoint/TLM solvers' matrix layout to whatever `kind` the
         # forward solver actually resolved to (kind=None can auto-resolve to
@@ -1157,19 +1162,22 @@ class NonlinearProblem(_ProblemBase, dolfinx.fem.petsc.NonlinearProblem):
 
         # Initialize nonlinear solver
         F_R, J_R, P_R = recursive_replace((F, J, P), self._value_placeholders)  # type: ignore[misc]
-        super().__init__(
-            F=F_R,  # type: ignore[arg-type]
-            J=J_R,  # type: ignore[arg-type]
-            P=P_R,  # type: ignore[arg-type]
-            bcs=self._bcs,
-            u=self._u,  # type: ignore[arg-type]
-            kind=kind,  # type: ignore[arg-type]
-            petsc_options_prefix=petsc_options_prefix,
-            petsc_options=petsc_options,
-            form_compiler_options=form_compiler_options,
-            jit_options=jit_options,
-            entity_maps=entity_maps,
-        )  # type: ignore[misc]
+        # As in LinearProblem above: compiling here is where a wrong-dtype coefficient
+        # first fails, in a message that names neither dtype nor coefficient.
+        with _explaining_scalar_type_mismatch((F_R, J_R, P_R)):
+            super().__init__(
+                F=F_R,  # type: ignore[arg-type]
+                J=J_R,  # type: ignore[arg-type]
+                P=P_R,  # type: ignore[arg-type]
+                bcs=self._bcs,
+                u=self._u,  # type: ignore[arg-type]
+                kind=kind,  # type: ignore[arg-type]
+                petsc_options_prefix=petsc_options_prefix,
+                petsc_options=petsc_options,
+                form_compiler_options=form_compiler_options,
+                jit_options=jit_options,
+                entity_maps=entity_maps,
+            )  # type: ignore[misc]
 
         # Adjoint and tangent-linear solver state: shared lazy-init machinery
         # lives in _ProblemBase._init_adjoint_state -- see LinearProblem's use

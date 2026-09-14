@@ -16,7 +16,7 @@ import pyadjoint
 import pytest
 import ufl
 
-from dolfinx_adjoint import Constant, Function, assemble_scalar
+from dolfinx_adjoint import Constant, Function, assemble_scalar, interpolate
 from dolfinx_adjoint.solvers import LinearProblem
 
 complex_only = pytest.mark.skipif(
@@ -56,7 +56,7 @@ def target(V):
     return t
 
 
-def _solve_helmholtz(mesh, V, source) -> Function:
+def _solve_helmholtz(mesh, V, source) -> tuple[LinearProblem, Function]:
     """A complex sesquilinear Helmholtz solve driven by ``source``.
 
     ``k`` is given a small imaginary part so the operator is genuinely complex (damped)
@@ -65,7 +65,7 @@ def _solve_helmholtz(mesh, V, source) -> Function:
     uh = Function(V, name="state")
     u = ufl.TrialFunction(V)
     v = ufl.TestFunction(V)
-    k = dolfinx.default_scalar_type(4.0 + 0.5j)
+    k = dolfinx.default_scalar_type(4.0 + 0.5j)  # type: ignore[arg-type]
     a = (ufl.inner(ufl.grad(u), ufl.grad(v)) - k**2 * ufl.inner(u, v)) * ufl.dx
     L = ufl.inner(source, v) * ufl.dx
 
@@ -263,6 +263,43 @@ def test_gradient_is_unchanged_by_the_order_of_a_squared_misfit(mesh, V, target)
         rng = np.random.default_rng(4)
 
     assert np.allclose(gradients[0], gradients[1])
+
+
+def test_gradient_through_an_interpolation_step_matches_finite_difference(mesh, V, target):
+    """A Control reaching the Functional through an interpolation into another space.
+
+    Interpolation between two spaces is a real linear map, but the field it is applied to is
+    complex, and the matrix DOLFINx builds for it is real-valued even under a complex build --
+    so the adjoint of this step has to apply a real operator to a complex vector without
+    dropping half of it.
+    """
+    pyadjoint.get_working_tape().clear_tape()
+    rng = np.random.default_rng(5)
+
+    W = dolfinx.fem.functionspace(mesh, ("Lagrange", 2))
+
+    f = Function(V, name="control")
+    f.x.array[:] = rng.uniform(-1.0, 1.0, size=f.x.array.shape)
+    f.x.scatter_forward()
+
+    problem, uh = _solve_helmholtz(mesh, V, f)
+    # The state is genuinely complex here (a damped Helmholtz solve), so an interpolation
+    # that dropped its imaginary part would still produce a plausible number.
+    target_W = dolfinx.fem.Function(W)
+    target_W.interpolate(target)
+
+    interpolated = interpolate(uh, W)
+    J = assemble_scalar(ufl.inner(interpolated, target_W) * ufl.dx)
+
+    Jhat = pyadjoint.ReducedFunctional(J, pyadjoint.Control(f))
+
+    h = Function(V)
+    h.x.array[:] = rng.uniform(-1.0, 1.0, size=h.x.array.shape)
+    h.x.scatter_forward()
+
+    dJdm = Jhat.derivative()._ad_dot(h)
+    assert np.isclose(dJdm, _finite_difference(Jhat, f, h, J), rtol=1e-6, atol=1e-8)
+    del problem
 
 
 def test_hessian_is_refused_under_complex_scalars(mesh, V, target):

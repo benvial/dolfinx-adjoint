@@ -140,7 +140,7 @@ def _tape_heat_equation(V, n_steps, schedule=None, disk=False, use_mpio=None):
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
     boundary_dofs = dolfinx.fem.locate_dofs_topological(V, mesh.topology.dim - 1, boundary_facets)
-    bc = dolfinx.fem.dirichletbc(0.0, boundary_dofs, V)
+    bc = dolfinx.fem.dirichletbc(dolfinx.default_scalar_type(0.0), boundary_dofs, V)
 
     problem = dolfinx_adjoint.LinearProblem(
         a,
@@ -400,7 +400,7 @@ def _tape_snes_heat_equation(V, n_steps, schedule=None, solution_dependent_diffu
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
     boundary_dofs = dolfinx.fem.locate_dofs_topological(V, mesh.topology.dim - 1, boundary_facets)
-    bc = dolfinx.fem.dirichletbc(0.0, boundary_dofs, V)
+    bc = dolfinx.fem.dirichletbc(dolfinx.default_scalar_type(0.0), boundary_dofs, V)
 
     snes_options = {
         "snes_type": "newtonls",

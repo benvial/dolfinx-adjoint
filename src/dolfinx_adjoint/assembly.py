@@ -10,7 +10,7 @@ from pyadjoint.overloaded_type import create_overloaded_object
 from pyadjoint.tape import annotate_tape, get_working_tape, stop_annotating
 
 from .blocks.assembly import AssembleBlock
-from .utils import scalar_type_mismatch_message
+from .utils import _explaining_scalar_type_mismatch
 
 
 def assemble_scalar(form: typing.Union[ufl.Form, dolfinx.fem.Form], **kwargs):
@@ -62,20 +62,15 @@ def assemble_scalar(form: typing.Union[ufl.Form, dolfinx.fem.Form], **kwargs):
         if already_compiled:
             compiled_form = form
         else:
-            try:
+            # A real/complex dtype mix fails deep inside the nanobind bindings, naming
+            # neither the dtype nor the coefficient at fault.
+            with _explaining_scalar_type_mismatch(form):
                 compiled_form = dolfinx.fem.form(
                     form,
                     jit_options=kwargs.pop("jit_options", None),
                     form_compiler_options=kwargs.pop("form_compiler_options", None),
                     entity_maps=kwargs.pop("entity_maps", None),
                 )
-            except (TypeError, RuntimeError) as e:
-                # A real/complex dtype mix fails deep inside the nanobind bindings, naming
-                # neither the dtype nor the coefficient at fault. Re-raise saying which.
-                hint = scalar_type_mismatch_message(form)
-                if hint is None:
-                    raise
-                raise type(e)(f"{hint}\n\nOriginal error: {e}") from e
 
         local_output = dolfinx.fem.assemble_scalar(compiled_form)
         output = compiled_form.mesh.comm.allreduce(local_output, op=MPI.SUM)

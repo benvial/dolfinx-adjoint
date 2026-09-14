@@ -17,10 +17,24 @@ from dolfinx_adjoint import Function, assemble_scalar, interpolate_nonmatching
 # extra), so skip rather than fail wherever it is absent. Marked rather than
 # `pytest.importorskip`-ed at module scope so each test still reports its own skip, and a
 # run's test count does not silently change with what happens to be installed.
-pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("fenicsx_ii") is None,
-    reason="non-matching interpolation requires the optional fenicsx_ii package",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        importlib.util.find_spec("fenicsx_ii") is None,
+        reason="non-matching interpolation requires the optional fenicsx_ii package",
+    ),
+    # The transfer matrix is built by fenicsx_ii, which allocates the basis values it
+    # evaluates -- and, through them, the interpolation coordinates it hands to
+    # dolfinx.geometry.determine_point_ownership -- with `dolfinx.default_scalar_type`
+    # rather than the mesh geometry's dtype (fenicsx_ii/interpolation_utils.py). Under a
+    # complex build that makes the coordinate array complex, which the geometry bindings
+    # reject outright. Nothing on this side can supply a real-dtype array to it, so
+    # non-matching interpolation under complex scalars waits on that upstream fix.
+    pytest.mark.skipif(
+        np.issubdtype(dolfinx.default_scalar_type, np.complexfloating),
+        reason="fenicsx_ii builds its interpolation coordinates in the scalar dtype, which "
+        "dolfinx.geometry.determine_point_ownership rejects when that dtype is complex",
+    ),
+]
 
 
 def _run_adjoint_and_taylor_test(mesh_from, mesh_to, use_petsc, assert_hessian_matches_finite_difference):

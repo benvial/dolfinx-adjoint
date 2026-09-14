@@ -27,7 +27,7 @@ def _poisson_bc_control_problem(mesh, g):
     u = ufl.TrialFunction(V)
     v = ufl.TestFunction(V)
     a = ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
-    L = ufl.inner(dolfinx.fem.Constant(mesh, 0.0), v) * ufl.dx
+    L = ufl.inner(dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(0.0)), v) * ufl.dx
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)

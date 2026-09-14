@@ -809,7 +809,10 @@ def test_default_petsc_options_prefix_is_unique_per_problem():
     assert linear_a._petsc_options_prefix != linear_b._petsc_options_prefix
 
     u1 = Function(V, name="state")
-    F = ufl.inner((1 + u1**2) * u1, v) * ufl.dx - ufl.inner(dolfinx.fem.Constant(mesh, 1.0), v) * ufl.dx
+    F = (
+        ufl.inner((1 + u1**2) * u1, v) * ufl.dx
+        - ufl.inner(dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(1.0)), v) * ufl.dx
+    )
     nonlinear_a = NonlinearProblem(F, u=u1)
     nonlinear_b = NonlinearProblem(F, u=u1)
     assert nonlinear_a._petsc_options_prefix != nonlinear_b._petsc_options_prefix
@@ -855,7 +858,7 @@ def test_nonlinear_blocked_problem_templates_compiled_once():
         + ufl.inner(ph, ufl.div(v)) * dx
         - ufl.inner(f, v) * dx
     )
-    F1 = ufl.inner(q, ufl.div(uh)) * dx
+    F1 = ufl.inner(ufl.div(uh), q) * dx
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
     facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)

@@ -131,7 +131,19 @@ class FunctionAssignBlock(Block):
         if self.expr is None:
             assert len(adj_inputs) == 1
             if isinstance(bo, AdjFloat):
-                return self._compute_adjoint_of_broadcast(adj_inputs[0], self._one)
+                gradient = self._compute_adjoint_of_broadcast(adj_inputs[0], self._one)
+                # An AdjFloat parameter is real-valued by construction, and pyadjoint's own
+                # AdjFloat offers no hook where the `2*Re[.]` that turns a complex adjoint
+                # seed into a real parameter's gradient could be applied -- for a Function or
+                # Constant Control that happens in
+                # {py:func}`dolfinx_adjoint.types.function._extract_real_parameter_gradient`,
+                # which pyadjoint reaches through the Control's own object. It therefore
+                # happens here instead, at the boundary where the real-valued parameter
+                # enters: everything upstream of a float is real, so taking the real part now
+                # loses nothing, and `AdjFloat(complex)` would simply raise.
+                if np.iscomplexobj(gradient):
+                    gradient = 2.0 * gradient.real
+                return gradient
             elif isinstance(bo, dolfinx.fem.Function):
                 if ufl.checks.is_scalar_constant_expression(bo):
                     # Adjoint of a broadcast into a real function (constant stored as Function)
