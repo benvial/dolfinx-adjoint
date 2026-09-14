@@ -1,31 +1,13 @@
 import typing
 
-from mpi4py import MPI
-
 import dolfinx
 import numpy
 import ufl
-from pyadjoint import Block, OverloadedType, create_overloaded_object
+from pyadjoint import Block, OverloadedType
 from ufl.formatting.ufl2unicode import ufl2unicode
 
+from ..utils import wirtinger_derivative_forms
 from ._vector import _create_vector, _SpecialVector, _vector  # noqa: F401
-
-
-def assemble_real_scalar(compiled_form: dolfinx.fem.Form) -> float:
-    """Assemble a rank-0 form across the communicator and return it as a Python ``float``.
-
-    ``dolfinx.fem.assemble_scalar`` always returns a complex value under a complex-PETSc
-    build, regardless of the form's structure. A Functional must be real-valued even
-    when the state is complex-valued, so the real part is taken unconditionally here --
-    mirroring the ``2*Re[...]`` real-part extraction already used for Real-lifted-control
-    gradients (see ``compute_action_adjoint`` and ``solvers.py``'s ``evaluate_adj_component``).
-    """
-    local_output = dolfinx.fem.assemble_scalar(compiled_form)
-    comm = compiled_form.mesh.comm
-    output = comm.allreduce(local_output, op=MPI.SUM)
-    if numpy.iscomplexobj(output):
-        output = output.real
-    return float(output)
 
 
 def assemble_compiled_form(
@@ -39,7 +21,9 @@ def assemble_compiled_form(
             into, while it is unused for a rank-0 form.
     Returns:
         For a rank-1 form, ``tensor`` itself (mutated in place). For a rank-0 form, the
-        assembled scalar as a Python ``float``.
+        assembled scalar as a Python ``float`` -- delegated to
+        {py:func}`dolfinx_adjoint.assemble_scalar` so that the definition
+        :math:`J := \\mathrm{Re}(\\mathrm{assemble}(form))` is stated in exactly one place.
     Raises:
         NotImplementedError: If the form's rank is not 0 or 1.
     """
@@ -52,9 +36,11 @@ def assemble_compiled_form(
         tensor.scatter_reverse(dolfinx.la.InsertMode.add)
         tensor.scatter_forward()
     elif form.rank == 0:
-        local_val = dolfinx.fem.assemble_scalar(form)
-        comm = form.mesh.comm
-        tensor = comm.allreduce(local_val, op=MPI.SUM)
+        # Deferred import: ..assembly imports AssembleBlock from this module, so a
+        # module-level import here would be circular.
+        from ..assembly import assemble_scalar
+
+        tensor = assemble_scalar(form, annotate=False)
     else:
         raise NotImplementedError("Only 1-form assembly is currently supported.")
     assert tensor is not None
@@ -112,7 +98,7 @@ class AssembleBlock(Block):
         form: ufl.Form | None = None,
         c_rep: typing.Union[ufl.Coefficient, ufl.Constant] | None = None,
         space: dolfinx.fem.FunctionSpace | None = None,
-        dform: dolfinx.fem.Form | None = None,
+        dform: ufl.Form | None = None,
     ):
         """This computes the action of the adjoint of the derivative of `form` wrt `c_rep` on `adj_input`.
 
@@ -140,16 +126,16 @@ class AssembleBlock(Block):
         if arity_form == 0:
             assert arity_form == self.compiled_form.rank, "Inconsistent arity of input form and block form."
             computing_own_output_derivative = dform is None
+            dform_imaginary_direction = None
             if dform is None:
                 assert space is not None
+                assert form is not None and c_rep is not None
                 dc = ufl.TestFunction(space)
-                # ufl.derivative is holomorphic and leaves its direction argument
-                # unconjugated, but UFL's complex-mode arity checker requires argument
-                # number 0 to appear conjugated in every complex-mode form. Passing
-                # ufl.conj(dc) as the direction satisfies that convention; it does not
-                # change the assembled values, since dc ranges over a real-valued
-                # (Lagrange) basis, for which conj(dc) == dc pointwise.
-                dform = ufl.derivative(form, c_rep, ufl.conj(dc))
+                # Not ufl.derivative directly: under a complex build a single derivative does
+                # not carry enough information to seed the adjoint, and the one UFL produces
+                # breaks its own complex-mode arity rules. See
+                # {py:func}`dolfinx_adjoint.utils.wirtinger_derivative_forms`.
+                dform, dform_imaginary_direction = wirtinger_derivative_forms(form, c_rep, dc)
 
             assert isinstance(dform, ufl.Form), "dform must be a UFL form."
             compiled_adjoint = dolfinx.fem.form(
@@ -173,18 +159,34 @@ class AssembleBlock(Block):
             # assemble_compiled_form(compiled_adjoint, self._cached_vectors[id(space)])
             assemble_compiled_form(compiled_adjoint, vector)
 
+            if dform_imaginary_direction is not None:
+                # Re(v1) + i*Re(v2) separates the holomorphic from the anti-holomorphic part
+                # of the derivative and conjugates the former, which is the seed every
+                # (Hermitian) pairing downstream expects; see
+                # {py:func}`dolfinx_adjoint.utils.wirtinger_derivative_forms`.
+                compiled_imaginary_direction = dolfinx.fem.form(
+                    dform_imaginary_direction,
+                    jit_options=self._jit_options,
+                    form_compiler_options=self._form_compiler_options,
+                    entity_maps=self._entity_maps,
+                )
+                imaginary_direction_vector = _create_vector(compiled_imaginary_direction, space)
+                imaginary_direction_vector.array[:] = 0.0
+                assemble_compiled_form(compiled_imaginary_direction, imaginary_direction_vector)
+                vector.array[:] = vector.array.real + 1j * imaginary_direction_vector.array.real
+
             if computing_own_output_derivative and numpy.iscomplexobj(vector.array):
-                # This block's own forward output is Re(assemble(form)) (assemble_real_scalar
+                # This block's own forward output is Re(assemble(form)) (`assemble_scalar`
                 # takes the real part unconditionally under a complex-PETSc build, since a
-                # Functional must be real-valued even when the state is complex-valued), but
-                # `dform` above differentiates the underlying *complex* form -- the full
-                # holomorphic derivative f'(u). Since Re(f(u)) = (f(u) + conj(f(u)))/2 and a
-                # Wirtinger derivative w.r.t. u holds u's independent conjugate fixed, the
-                # conj(f(u)) branch contributes nothing and the correct derivative of Re(f(u))
-                # is (1/2) f'(u). Only applies when `dform` is freshly derived from `form` here
-                # (this block's own output); a caller-supplied `dform` (e.g. the Hessian
-                # path's second directional derivative) is a different quantity and is left
-                # untouched -- complex-mode Hessians are not yet supported.
+                # Functional must be real-valued even when the state is complex-valued), while
+                # the seed above differentiates the underlying *complex* form. A real
+                # parameter's gradient is recovered from an accumulated seed as `2*Re[.]`, in
+                # `Function._ad_convert_riesz`; the derivative of Re(f) wanted here is one
+                # half of that, so the one-half is applied at this end. Only applies when the
+                # seed is freshly derived from `form` here (this block's own output); a
+                # caller-supplied `dform` (e.g. the Hessian path's second directional
+                # derivative) is a different quantity and is left untouched -- complex-mode
+                # Hessians are not yet supported.
                 vector.array[:] *= 0.5
 
             # return a vector scaled by the scalar `adj_input`
@@ -194,17 +196,10 @@ class AssembleBlock(Block):
             vector.array[:] *= vector.x.array.dtype.type(adj_input)
             vector.scatter_forward()
 
-            # Deferred import: ..types.function imports assemble_compiled_form from this
-            # module, so a module-level import here would be circular.
-            from ..types.function import RealLifted
-
-            if isinstance(c_rep, RealLifted):
-                # See solvers.py's evaluate_adj_component (same fix, same rationale):
-                # the gradient of a real Functional w.r.t. a real (Real-lifted) parameter
-                # is its real part doubled (standard adjoint theory for a real parameter:
-                # dJ/dm = 2*Re[lambda^H . dR/dm]).
-                vector.array[:] = 2.0 * vector.array.real
-
+            # Returns the raw complex result under a complex build: this may be an adjoint
+            # seed bound for a Block further upstream, so its real part must not be taken
+            # here. The `2*Re[.]` that turns an accumulated seed into a real parameter's
+            # gradient happens once, at the Control, in `Function._ad_convert_riesz`.
             return vector, dform
             # Return a Vector scaled by the scalar `adj_input`
             # self._cached_vectors[id(space)].array[:] *= adj_input
@@ -318,6 +313,19 @@ class AssembleBlock(Block):
         hessian_input = hessian_inputs[0]
         adj_input = adj_inputs[0]
 
+        if numpy.issubdtype(numpy.dtype(dolfinx.default_scalar_type), numpy.complexfloating):
+            # Second-order adjoints have not been derived for complex scalars. The pieces that
+            # make the first-order path correct are first-order-specific: the one-half
+            # Wirtinger factor in `compute_action_adjoint` is applied only to a block's own
+            # output derivative, and the `2*Re[.]` extraction in `Function._ad_convert_riesz`
+            # is a real *gradient*'s definition, not a Hessian's. Running anyway would return
+            # a plausible number from a path nobody has checked, so refuse instead.
+            raise NotImplementedError(
+                "Hessians are not supported under a complex-scalar build: the second-order "
+                "adjoint has not been derived for complex scalars. First-order gradients "
+                "(ReducedFunctional.derivative) are supported."
+            )
+
         from ufl.algorithms.analysis import extract_arguments
 
         arity_form = len(extract_arguments(form))
@@ -366,13 +374,14 @@ class AssembleBlock(Block):
         return self.prepare_evaluate_adj(inputs, None, None)
 
     def recompute_component(self, inputs, block_variable, idx, prepared):
-        form = prepared
+        # Deferred import: ..assembly imports AssembleBlock from this module, so a
+        # module-level import here would be circular.
+        from ..assembly import assemble_scalar
 
-        compiled_form = dolfinx.fem.form(
-            form,
+        return assemble_scalar(
+            prepared,
+            annotate=False,
             jit_options=self._jit_options,
             form_compiler_options=self._form_compiler_options,
             entity_maps=self._entity_maps,
         )
-        output = create_overloaded_object(assemble_real_scalar(compiled_form))
-        return output

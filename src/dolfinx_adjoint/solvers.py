@@ -13,7 +13,6 @@ from .blocks.solvers import (
     LinearProblemBlock,
     NonlinearProblemBlock,
     _ProblemBlockBase,
-    _reject_real_lifted_unknown,
     collect_coefficients,
 )
 from .petsc_utils import HomogeneousBCLinearProblem
@@ -905,12 +904,6 @@ class LinearProblem(_ProblemBase, dolfinx.fem.petsc.LinearProblem):
                 P, _ = assign_mixed_parts(P, L)  # type: ignore[arg-type]
 
         self._u = find_or_create_then_overload(u, L)  # type: ignore[arg-type]
-        # Checked here (construction time), not only in LinearProblemBlock.__init__, since
-        # that Block is only ever built when solve(annotate=True) actually records one --
-        # solve(annotate=False) would otherwise silently let the forward solve overwrite a
-        # RealLifted's dofs with a genuinely complex solution, violating its leaf/zero-
-        # imaginary invariant with no error.
-        _reject_real_lifted_unknown(self._u)
 
         # Unique, synchronized prefix for every solver instance (as SNES requires sync in prefix
         # across processes).
@@ -1126,9 +1119,6 @@ class NonlinearProblem(_ProblemBase, dolfinx.fem.petsc.NonlinearProblem):
             F = assign_mixed_parts(F)  # type: ignore[arg-type]
 
         self._u = find_or_create_then_overload(u, F)  # type: ignore[arg-type]
-        # See LinearProblem.__init__ for why this is checked here (construction time)
-        # rather than only in NonlinearProblemBlock.__init__.
-        _reject_real_lifted_unknown(self._u)
         self._bcs = [] if bcs is None else bcs
 
         # Unique, synchronized prefix for every solver instance (as SNES requires sync in prefix

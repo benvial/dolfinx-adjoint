@@ -21,6 +21,46 @@ from ..checkpointing import SnapshotCheckpoint, maybe_disk_checkpoint
 from ..utils import function_from_vector, gather
 
 
+def _extract_real_parameter_gradient(value: dolfinx.la.Vector, V: dolfinx.fem.FunctionSpace) -> dolfinx.la.Vector:
+    """Turn a Control's accumulated adjoint value into a real parameter's gradient.
+
+    A Control under a complex-scalar build is real-valued -- complex-valued controls are out
+    of scope -- and is represented as a complex Function whose imaginary part is identically
+    zero, which is simply what constructing one with the default dtype gives under such a
+    build. The adjoint machinery upstream assembles a genuinely complex Hermitian pairing, and
+    the gradient of a real Functional with respect to a real parameter is its real part
+    doubled:
+
+    .. math::
+
+        \\frac{dJ}{dm} = 2\\,\\mathrm{Re}\\left[\\lambda^H \\frac{dR}{dm}\\right]
+
+    This is the one place that extraction happens. It is called only from the two hooks
+    pyadjoint routes a Control's derivative through -- ``_ad_convert_riesz`` (for
+    ``apply_riesz=True``) and ``_ad_init_object`` (for ``apply_riesz=False``, which is what
+    ``ReducedFunctional.derivative`` and ``taylor_test`` use) -- so "this value is a terminal
+    gradient rather than a mid-chain adjoint seed" holds by construction, with no marker type
+    needed to record it. Because :math:`2\\mathrm{Re}[\\cdot]` is linear, applying it once
+    to the accumulated adjoint value is identical to applying it inside each contributing
+    Block, and doing it here covers every Block type at once -- including those whose
+    complex-mode support is not yet written, and ``Constant`` controls.
+
+    Returns a new vector; ``value`` belongs to the caller and is never written to.
+
+    Args:
+        value: The Control's accumulated adjoint value.
+        V: The Control's function space, which the returned gradient lives in.
+
+    Returns:
+        ``2*Re[value]`` under a complex build, or ``value`` unchanged under a real one.
+    """
+    if not numpy.iscomplexobj(value.array):
+        return value
+    real_value = _vector(V.dofmap.index_map, V.dofmap.index_map_bs, function_space=V, dtype=value.array.dtype)
+    real_value.array[:] = 2.0 * value.array.real
+    return real_value
+
+
 def _create_function(
     V: dolfinx.fem.FunctionSpace,
     dtype: npt.DTypeLike = dolfinx.default_scalar_type,
@@ -90,6 +130,14 @@ class Function(dolfinx.fem.Function, FloatingType):
 
     @classmethod
     def _ad_init_object(cls, obj):
+        if isinstance(obj, _SpecialVector):
+            # A bare vector reaches `_ad_init_object` from exactly one place:
+            # `Control.get_derivative(apply_riesz=False)`, converting a Control's accumulated
+            # adjoint value into a control-typed dual object. That is the default path for
+            # `ReducedFunctional.derivative` and hence for `taylor_test`, so the real-parameter
+            # extraction has to happen here as well as in `_ad_convert_riesz`. Every other
+            # caller (`create_overloaded_object`) passes a `dolfinx.fem.Function` instead.
+            obj = _extract_real_parameter_gradient(obj, obj.function_space)
         return cls(obj.function_space, obj.x, obj.name)
 
     @property
@@ -131,7 +179,18 @@ class Function(dolfinx.fem.Function, FloatingType):
         options = {} if options is None else options
         riesz_representation = options.get("riesz_representation", "l2")
         if riesz_representation == "l2":
-            return dolfinx.cpp.la.inner_product(self.x._cpp_object, other.x._cpp_object)  # type: ignore[arg-type]
+            inner = dolfinx.cpp.la.inner_product(self.x._cpp_object, other.x._cpp_object)  # type: ignore[arg-type]
+            # Real part only, for the same reason `assemble_scalar` takes it: within the
+            # supported scope both operands are real-valued, and a real number is what every
+            # consumer (`taylor_test`'s remainders, optimiser line searches) expects back.
+            #
+            # Taking it also reconciles this branch with the "L2"/"H1" ones below, which
+            # would otherwise disagree with it by a conjugation on any complex input:
+            # `dolfinx.cpp.la.inner_product(a, b)` computes `sum(conj(a) * b)` (conjugating
+            # its *first* argument) while `ufl.inner(a, b)` in complex mode computes
+            # `sum(a * conj(b))` (conjugating its *second*). The two are complex conjugates
+            # of each other, so their real parts agree exactly.
+            return float(numpy.real(inner))
         elif riesz_representation == "L2":
             form_compiler_options = options.get("form_compiler_options", None)
             jit_options = options.get("jit_options", None)
@@ -201,6 +260,13 @@ class Function(dolfinx.fem.Function, FloatingType):
         """Convert a vector to a Riesz representation of the function."""
         options = {} if riesz_map is None else riesz_map
         riesz_representation = options.get("riesz_representation", "l2")
+        # Applied before the branch dispatch rather than within each branch: the "L2" and
+        # "H1" Riesz maps solve against mass/stiffness matrices whose entries are real (a
+        # Lagrange space stored in a complex dtype), and a real linear operator commutes with
+        # `2*Re[.]`, so the order does not matter there. For a caller-supplied callable Riesz
+        # map the order *is* observable, and pre-dispatch is the right choice: the callable
+        # then receives the real-valued gradient a real control's Riesz map expects.
+        value = _extract_real_parameter_gradient(value, self.function_space)
         if riesz_representation == "l2":
             return create_overloaded_object(function_from_vector(self.function_space, value))
         elif riesz_representation == "L2":
@@ -256,6 +322,11 @@ class Function(dolfinx.fem.Function, FloatingType):
         else:
             m_v = m
         m_a = gather(m_v)
+        if numpy.iscomplexobj(m_a):
+            # The boundary to consumers that take a plain array of floats (scipy-style
+            # optimisers, in particular). Values crossing here are real-valued by scope --
+            # a real control, or the `2*Re[.]` gradient `_ad_convert_riesz` produces for one.
+            m_a = m_a.real
         return m_a.tolist()
 
     def _ad_copy(self):
@@ -333,57 +404,12 @@ class Constant(Function):
 
     @classmethod
     def _ad_init_object(cls, obj):
+        # See Function._ad_init_object: a bare vector here is a Control's adjoint value
+        # arriving via `Control.get_derivative(apply_riesz=False)`.
+        if isinstance(obj, _SpecialVector):
+            obj = _extract_real_parameter_gradient(obj, obj.function_space)
         return cls(obj.function_space.mesh, obj.x.array[:])
-
-
-@attach_ufl_id
-class RealLifted(Function):
-    """A real-valued Control represented as a complex-valued {py:class}`Function` whose
-    imaginary part is identically zero, so it can appear in the same form as a
-    complex-valued state without tripping DOLFINx's restriction against mixing
-    real- and complex-dtype Functions in one form (tracked upstream as FEniCS/dolfinx#3880).
-    This is a deliberate workaround for that restriction, not the eventual design --
-    once dolfinx supports mixed dtypes natively the lift may no longer be necessary.
-
-    Leaf-only: a {py:class}`RealLifted` must be user-supplied data (e.g. a Control), never
-    the recorded output of a {py:class}`~dolfinx_adjoint.solvers.LinearProblem` or
-    {py:class}`~dolfinx_adjoint.solvers.NonlinearProblem` solve -- the adjoint code paths
-    that key off ``isinstance(c_rep, RealLifted)`` assume every occurrence is a terminal
-    gradient target, not an intermediate adjoint seed. Passing one as a Problem's ``u=``
-    is rejected at construction time.
-
-    Args:
-        V: The function space of the function. Must carry a complex scalar dtype.
-        x: Optional vector to initialize the function with. Its imaginary part must
-            already be identically zero.
-        name: Optional name for the function.
-        dtype: Data type of the function values, defaults to `dolfinx.default_scalar_type`.
-            Must be a complex dtype.
-
-    Raises:
-        TypeError: If ``dtype`` is not a complex dtype.
-        ValueError: If ``x`` is provided with a non-zero imaginary part.
-    """
-
-    def __init__(
-        self,
-        V: dolfinx.fem.FunctionSpace,
-        x: dolfinx.la.Vector | None = None,
-        name: str | None = None,
-        dtype: npt.DTypeLike = dolfinx.default_scalar_type,
-        ufl_id: int | None = None,
-    ):
-        if not numpy.issubdtype(dtype, numpy.complexfloating):
-            raise TypeError(
-                f"RealLifted requires a complex scalar dtype (got {dtype}); it represents a "
-                "real-valued control lifted into a complex Function with an identically-zero "
-                "imaginary part."
-            )
-        super().__init__(V, x=x, name=name, dtype=dtype, ufl_id=ufl_id)
-        if not numpy.allclose(self.x.array.imag, 0.0):
-            raise ValueError("RealLifted requires a Function whose imaginary part is identically zero.")
 
 
 register_overloaded_type(Function, (dolfinx.fem.Function, Function))
 register_overloaded_type(Constant, (dolfinx.fem.Constant, Constant))
-register_overloaded_type(RealLifted, (RealLifted,))
