@@ -382,6 +382,7 @@ def optimize(
 # Mosaic's canonical `optimization/topopt` run uses `corner_load=True`; we additionally
 # run the uniform full-face load for comparison.
 # We use the settings from the benchmark website to enable a suitable runtime for the optimization.
+# For other settings, see {cite}`top-rehmann2026mosaic`.
 #
 # `trust-constr` logs a row per iteration, so this cell carries the `output_scroll` tag:
 # the log is rendered as a scroll box instead of several screens of text.
