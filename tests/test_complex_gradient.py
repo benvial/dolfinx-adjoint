@@ -18,6 +18,7 @@ import ufl
 
 from dolfinx_adjoint import Constant, Function, assemble_scalar, interpolate
 from dolfinx_adjoint.solvers import LinearProblem
+from dolfinx_adjoint.utils import scalar_type_mismatch_message
 
 complex_only = pytest.mark.skipif(
     not np.issubdtype(dolfinx.default_scalar_type, np.complexfloating),
@@ -376,3 +377,37 @@ def test_mixed_scalar_type_form_names_the_offending_coefficient(mesh, V):
 
     with pytest.raises((TypeError, RuntimeError), match="mixes real- and complex-dtype"):
         assemble_scalar(ufl.inner(complex_fn, real_fn) * ufl.dx, annotate=False)
+
+
+@pytest.mark.parametrize(
+    "not_a_ufl_form",
+    [
+        pytest.param(None, id="absent-preconditioner"),
+        pytest.param(0, id="every-term-dropped"),
+        pytest.param("compiled", id="already-compiled-form"),
+        pytest.param("zero-base-form", id="ufl-ZeroBaseForm"),
+    ],
+)
+def test_dtype_diagnostic_declines_rather_than_raises_on_a_non_form(mesh, V, not_a_ufl_form):
+    """The dtype diagnostic must never raise, because it runs inside an ``except`` block.
+
+    {py:func}`dolfinx_adjoint.utils.scalar_type_mismatch_message` is reached only from
+    ``_explaining_scalar_type_mismatch``, i.e. while a real failure is already propagating. Not
+    everything handed to it is a ``ufl.Form`` or a nesting of them: a blocked problem passes
+    ``None`` for an absent preconditioner, replacing every term of a form leaves a
+    ``ufl.ZeroBaseForm`` or a plain ``0`` behind, and ``assemble_scalar`` accepts an
+    already-compiled form. Walking those as if they were sequences raised
+    ``TypeError: ... is not iterable`` *from inside the handler*, which replaced the original
+    error with one about the diagnostic itself -- the exact opposite of what it is for.
+
+    Declining (returning ``None``, so the original error is re-raised untouched) is the right
+    answer for all of them: none carries UFL coefficients whose dtypes could be compared.
+    """
+    if not_a_ufl_form == "compiled":
+        u = dolfinx.fem.Function(V)
+        not_a_ufl_form = dolfinx.fem.form(ufl.inner(u, u) * ufl.dx)
+    elif not_a_ufl_form == "zero-base-form":
+        not_a_ufl_form = ufl.form.ZeroBaseForm((ufl.Argument(V, 0),))
+
+    assert scalar_type_mismatch_message(not_a_ufl_form) is None
+    assert scalar_type_mismatch_message([not_a_ufl_form, None]) is None

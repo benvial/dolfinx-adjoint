@@ -162,11 +162,18 @@ def scalar_type_mismatch_message(form: typing.Any) -> str | None:
         by_dtype.setdefault(dtype, []).append(str(name))
 
     def record_form(candidate) -> None:
-        if candidate is None:
-            return
-        if not isinstance(candidate, ufl.Form):
+        if isinstance(candidate, (list, tuple)):
             for nested in candidate:
                 record_form(nested)
+            return
+        if not isinstance(candidate, ufl.Form):
+            # Anything that is neither a UFL form nor a nesting of them carries no UFL
+            # coefficients to walk: a blocked problem's absent preconditioner (``None``), the
+            # ``ufl.ZeroBaseForm`` or plain ``0`` that dropping every term of a form leaves
+            # behind, or a form that has already been compiled. Skipping those matters more
+            # than it looks, because this runs inside an ``except`` block: raising here
+            # ("'ZeroBaseForm' object is not iterable") would replace the very error the
+            # diagnostic exists to explain.
             return
         for coefficient in ufl.algorithms.extract_coefficients(candidate):
             record(coefficient)
