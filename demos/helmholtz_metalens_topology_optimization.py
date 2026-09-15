@@ -167,12 +167,12 @@ FOCUS_CENTRE, FOCUS_RADIUS = (2, 0.0), 0.2  # the spot whose intensity we maximi
 
 EPS_MATERIAL = 4.0  # relative permittivity of the solid phase (refractive index 2)
 PENALIZATION = 1.0  # SIMP exponent; 1 is plain linear interpolation, leaving beta to binarize
-FILTER_RADIUS = 0.1  # Helmholtz-filter length scale; keep it a few cell widths, see below
+FILTER_RADIUS = 0.2  # Helmholtz-filter length scale; keep it a few cell widths, see below
 ETA = 0.5  # projection threshold
 BETA_STAGES = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0)  # projection-sharpness continuation
 ITERATIONS_PER_STAGE = 20
 
-CELLS_PER_WAVELENGTH = 12  # cell width h = WAVELENGTH / CELLS_PER_WAVELENGTH
+CELLS_PER_WAVELENGTH = 10  # cell width h = WAVELENGTH / CELLS_PER_WAVELENGTH
 
 RHO_INIT = 0.5  # uniform grey: no bias towards any particular design
 LIVE_PREVIEW = False  # redraw the design and field after every optimizer iteration
@@ -188,18 +188,6 @@ PETSC_LU = {
 # -
 
 # ## Mesh and subdomains
-#
-# The mesh is built with gmsh so that every region boundary is a mesh line. A uniform
-# {py:func}`dolfinx.mesh.create_rectangle` grid does not know about the design slab, the focal
-# disc or the PML interface, so each of them cuts through elements, and a cell can then only be
-# assigned to whichever region owns most of it. That costs real accuracy: the focal disc came
-# out 28% smaller than its own area, and the design slab lost a cell layer on every side.
-# Fragmenting the geometry in gmsh removes the question -- the regions *are* unions of cells,
-# exactly, and their tags come straight from the physical groups.
-#
-# Making the PML interface conform matters too: the stretch profile below has a kink at
-# $|x| = x_\mathrm{phys}$, which an element straddling the interface would have to interpolate
-# through.
 
 # +
 gmsh.initialize()
