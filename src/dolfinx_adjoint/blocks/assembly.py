@@ -1,13 +1,70 @@
 import typing
 
+from mpi4py import MPI
+
 import dolfinx
 import numpy
 import ufl
-from pyadjoint import Block, OverloadedType
+from pyadjoint import Block, OverloadedType, create_overloaded_object
 from ufl.formatting.ufl2unicode import ufl2unicode
 
-from ..utils import wirtinger_derivative_forms
+from ..ufl_utils import wirtinger_derivative_forms
+from ..utils import _compile_form, _refuse_second_order_adjoint_under_complex
 from ._vector import _create_vector, _SpecialVector, _vector  # noqa: F401
+
+
+def _assemble_scalar_value(
+    form: typing.Union[ufl.Form, dolfinx.fem.Form],
+    jit_options: dict | None = None,
+    form_compiler_options: dict | None = None,
+    entity_maps: typing.Any = None,
+) -> float:
+    """Assemble a rank-0 form into a real scalar, reducing across the communicator.
+
+    This is the only rank-0 assembly in the package, and so the only place that fixes what an
+    assembled scalar *means*: under a complex-scalar build the real part is taken
+    unconditionally, defining the assembled quantity as
+
+    .. math::
+
+        J := \\mathrm{Re}\\left(\\mathrm{assemble}(form)\\right)
+
+    That is a definition rather than error-correction. A Functional must be real-valued even
+    when the state is complex-valued, and :math:`\\mathrm{Re}(f(u))` is a perfectly
+    well-defined real functional of a complex state -- the adjoint path differentiates *it*,
+    consistently, which is exactly why
+    {py:meth}`~dolfinx_adjoint.blocks.assembly.AssembleBlock.compute_action_adjoint` carries a
+    factor of one half (:math:`\\mathrm{Re}(f(u))`'s Wirtinger derivative is
+    :math:`\\tfrac{1}{2}f'(u)`, not :math:`f'(u)`). Taking the real part is also not optional
+    plumbing: {py:func}`dolfinx.fem.assemble_scalar` returns a complex value under a
+    complex-PETSc build whatever the form's structure.
+
+    The definition lives here, beside the only other assembly in the package, rather than in
+    {py:func}`dolfinx_adjoint.assemble_scalar`: what an assembled rank-0 form means is a fact
+    about assembly, not about tape annotation, and the annotating entry point is a caller of
+    this like any other.
+
+    Args:
+        form: The rank-0 form, symbolic (UFL) or already compiled. A compiled form ignores
+            the compilation options below.
+        jit_options: JIT compilation options.
+        form_compiler_options: Form compiler options.
+        entity_maps: Relations between the meshes of the form's arguments and coefficients.
+
+    Returns:
+        The reduced, real-valued scalar.
+    """
+    if isinstance(form, ufl.Form):
+        form = _compile_form(
+            form,
+            jit_options=jit_options,
+            form_compiler_options=form_compiler_options,
+            entity_maps=entity_maps,
+        )
+    local_output = dolfinx.fem.assemble_scalar(form)
+    output = form.mesh.comm.allreduce(local_output, op=MPI.SUM)
+    # See this function's docstring: J := Re(assemble(form)), unconditionally.
+    return float(numpy.real(output))
 
 
 def assemble_compiled_form(
@@ -22,7 +79,7 @@ def assemble_compiled_form(
     Returns:
         For a rank-1 form, ``tensor`` itself (mutated in place). For a rank-0 form, the
         assembled scalar as a Python ``float`` -- delegated to
-        {py:func}`dolfinx_adjoint.assemble_scalar` so that the definition
+        {py:func}`_assemble_scalar_value` so that the definition
         :math:`J := \\mathrm{Re}(\\mathrm{assemble}(form))` is stated in exactly one place.
     Raises:
         NotImplementedError: If the form's rank is not 0 or 1.
@@ -36,11 +93,7 @@ def assemble_compiled_form(
         tensor.scatter_reverse(dolfinx.la.InsertMode.add)
         tensor.scatter_forward()
     elif form.rank == 0:
-        # Deferred import: ..assembly imports AssembleBlock from this module, so a
-        # module-level import here would be circular.
-        from ..assembly import assemble_scalar
-
-        tensor = assemble_scalar(form, annotate=False)
+        tensor = _assemble_scalar_value(form)
     else:
         raise NotImplementedError("Only 1-form assembly is currently supported.")
     assert tensor is not None
@@ -75,7 +128,7 @@ class AssembleBlock(Block):
 
         # Store compiled and original form
         self.form = form
-        self.compiled_form = dolfinx.fem.form(
+        self.compiled_form = _compile_form(
             form, jit_options=jit_options, form_compiler_options=form_compiler_options, entity_maps=entity_maps
         )
 
@@ -134,11 +187,11 @@ class AssembleBlock(Block):
                 # Not ufl.derivative directly: under a complex build a single derivative does
                 # not carry enough information to seed the adjoint, and the one UFL produces
                 # breaks its own complex-mode arity rules. See
-                # {py:func}`dolfinx_adjoint.utils.wirtinger_derivative_forms`.
+                # {py:func}`dolfinx_adjoint.ufl_utils.wirtinger_derivative_forms`.
                 dform, dform_imaginary_direction = wirtinger_derivative_forms(form, c_rep, dc)
 
             assert isinstance(dform, ufl.Form), "dform must be a UFL form."
-            compiled_adjoint = dolfinx.fem.form(
+            compiled_adjoint = _compile_form(
                 dform,
                 jit_options=self._jit_options,
                 form_compiler_options=self._form_compiler_options,
@@ -163,8 +216,8 @@ class AssembleBlock(Block):
                 # Re(v1) + i*Re(v2) separates the holomorphic from the anti-holomorphic part
                 # of the derivative and conjugates the former, which is the seed every
                 # (Hermitian) pairing downstream expects; see
-                # {py:func}`dolfinx_adjoint.utils.wirtinger_derivative_forms`.
-                compiled_imaginary_direction = dolfinx.fem.form(
+                # {py:func}`dolfinx_adjoint.ufl_utils.wirtinger_derivative_forms`.
+                compiled_imaginary_direction = _compile_form(
                     dform_imaginary_direction,
                     jit_options=self._jit_options,
                     form_compiler_options=self._form_compiler_options,
@@ -284,7 +337,7 @@ class AssembleBlock(Block):
                 dform += ufl.derivative(form, c_rep, tlm_value)
         if not isinstance(dform, float):
             dform = ufl.algorithms.expand_derivatives(dform)
-            compiled_form = dolfinx.fem.form(
+            compiled_form = _compile_form(
                 dform,
                 jit_options=self._jit_options,
                 form_compiler_options=self._form_compiler_options,
@@ -313,18 +366,7 @@ class AssembleBlock(Block):
         hessian_input = hessian_inputs[0]
         adj_input = adj_inputs[0]
 
-        if numpy.issubdtype(numpy.dtype(dolfinx.default_scalar_type), numpy.complexfloating):
-            # Second-order adjoints have not been derived for complex scalars. The pieces that
-            # make the first-order path correct are first-order-specific: the one-half
-            # Wirtinger factor in `compute_action_adjoint` is applied only to a block's own
-            # output derivative, and the `2*Re[.]` extraction in `Function._ad_convert_riesz`
-            # is a real *gradient*'s definition, not a Hessian's. Running anyway would return
-            # a plausible number from a path nobody has checked, so refuse instead.
-            raise NotImplementedError(
-                "Hessians are not supported under a complex-scalar build: the second-order "
-                "adjoint has not been derived for complex scalars. First-order gradients "
-                "(ReducedFunctional.derivative) are supported."
-            )
+        _refuse_second_order_adjoint_under_complex()
 
         from ufl.algorithms.analysis import extract_arguments
 
@@ -374,14 +416,11 @@ class AssembleBlock(Block):
         return self.prepare_evaluate_adj(inputs, None, None)
 
     def recompute_component(self, inputs, block_variable, idx, prepared):
-        # Deferred import: ..assembly imports AssembleBlock from this module, so a
-        # module-level import here would be circular.
-        from ..assembly import assemble_scalar
-
-        return assemble_scalar(
-            prepared,
-            annotate=False,
-            jit_options=self._jit_options,
-            form_compiler_options=self._form_compiler_options,
-            entity_maps=self._entity_maps,
+        return create_overloaded_object(
+            _assemble_scalar_value(
+                prepared,
+                jit_options=self._jit_options,
+                form_compiler_options=self._form_compiler_options,
+                entity_maps=self._entity_maps,
+            )
         )

@@ -18,10 +18,13 @@ from ufl.core.ufl_id import attach_ufl_id
 from ..blocks._vector import _SpecialVector, _vector
 from ..blocks.assembly import assemble_compiled_form
 from ..checkpointing import SnapshotCheckpoint, maybe_disk_checkpoint
-from ..utils import function_from_vector, gather
+from ..utils import _compile_form, function_from_vector, gather
 
 
-def _extract_real_parameter_gradient(value: dolfinx.la.Vector, V: dolfinx.fem.FunctionSpace) -> dolfinx.la.Vector:
+def _extract_real_parameter_gradient(
+    value: typing.Union[dolfinx.la.Vector, numpy.number, complex],
+    V: dolfinx.fem.FunctionSpace | None = None,
+) -> typing.Union[dolfinx.la.Vector, numpy.number, complex]:
     """Turn a Control's accumulated adjoint value into a real parameter's gradient.
 
     A Control under a complex-scalar build is real-valued -- complex-valued controls are out
@@ -35,29 +38,43 @@ def _extract_real_parameter_gradient(value: dolfinx.la.Vector, V: dolfinx.fem.Fu
 
         \\frac{dJ}{dm} = 2\\,\\mathrm{Re}\\left[\\lambda^H \\frac{dR}{dm}\\right]
 
-    This is the one place that extraction happens. It is called only from the two hooks
-    pyadjoint routes a Control's derivative through -- ``_ad_convert_riesz`` (for
+    This is the only implementation of that extraction, and every path that reaches a
+    real-valued parameter goes through it. Most arrive at a Control, through the two hooks
+    pyadjoint routes a Control's derivative via -- ``_ad_convert_riesz`` (for
     ``apply_riesz=True``) and ``_ad_init_object`` (for ``apply_riesz=False``, which is what
-    ``ReducedFunctional.derivative`` and ``taylor_test`` use) -- so "this value is a terminal
-    gradient rather than a mid-chain adjoint seed" holds by construction, with no marker type
-    needed to record it. Because :math:`2\\mathrm{Re}[\\cdot]` is linear, applying it once
-    to the accumulated adjoint value is identical to applying it inside each contributing
-    Block, and doing it here covers every Block type at once -- including those whose
-    complex-mode support is not yet written, and ``Constant`` controls.
+    ``ReducedFunctional.derivative`` and ``taylor_test`` use). The exception is an
+    ``AdjFloat`` parameter, which is real-valued by construction and offers pyadjoint no
+    Control-side hook of its own, so
+    {py:meth}`~dolfinx_adjoint.blocks.function_assigner.FunctionAssignBlock.evaluate_adj_component`
+    calls this at the boundary where the float enters instead. In every case "this value is a
+    terminal gradient rather than a mid-chain adjoint seed" holds by construction of the call
+    site, with no marker type needed to record it. Because :math:`2\\mathrm{Re}[\\cdot]`
+    is linear, applying it once to the accumulated adjoint value is identical to applying it
+    inside each contributing Block, and doing it here covers every Block type at once --
+    including those whose complex-mode support is not yet written, and ``Constant`` controls.
 
-    Returns a new vector; ``value`` belongs to the caller and is never written to.
+    Never writes to ``value``, which belongs to the caller; a vector gradient is returned as
+    a new vector.
 
     Args:
-        value: The Control's accumulated adjoint value.
-        V: The Control's function space, which the returned gradient lives in.
+        value: The accumulated adjoint value -- a {py:class}`dolfinx.la.Vector` when the
+            parameter is a Function or Constant, or a scalar when it is an ``AdjFloat``.
+        V: The Control's function space, which the returned gradient lives in. Required for
+            a vector ``value``, and meaningless for a scalar one.
 
     Returns:
-        ``2*Re[value]`` under a complex build, or ``value`` unchanged under a real one.
+        ``2*Re[value]`` under a complex build, or ``value`` unchanged under a real one, in
+        whichever of the two representations it arrived in.
     """
-    if not numpy.iscomplexobj(value.array):
-        return value
-    real_value = _vector(V.dofmap.index_map, V.dofmap.index_map_bs, function_space=V, dtype=value.array.dtype)
-    real_value.array[:] = 2.0 * value.array.real
+    if V is None:
+        # Scalar parameter (`AdjFloat`): nothing to allocate, and no space it lives in.
+        scalar = typing.cast(typing.Union[numpy.number, complex], value)
+        return 2.0 * scalar.real if numpy.iscomplexobj(scalar) else scalar
+    vector = typing.cast(dolfinx.la.Vector, value)
+    if not numpy.iscomplexobj(vector.array):
+        return vector
+    real_value = _vector(V.dofmap.index_map, V.dofmap.index_map_bs, function_space=V, dtype=vector.array.dtype)
+    real_value.array[:] = 2.0 * vector.array.real
     return real_value
 
 
@@ -195,7 +212,7 @@ class Function(dolfinx.fem.Function, FloatingType):
             form_compiler_options = options.get("form_compiler_options", None)
             jit_options = options.get("jit_options", None)
             mass = ufl.inner(self, other) * ufl.dx
-            compiled_form = dolfinx.fem.form(
+            compiled_form = _compile_form(
                 mass,
                 jit_options=jit_options,
                 form_compiler_options=form_compiler_options,
@@ -205,7 +222,7 @@ class Function(dolfinx.fem.Function, FloatingType):
             form_compiler_options = options.get("form_compiler_options", None)
             jit_options = options.get("jit_options", None)
             mass_and_stiffness = ufl.inner(self, other) * ufl.dx + ufl.inner(ufl.grad(self), ufl.grad(other)) * ufl.dx
-            compiled_form = dolfinx.fem.form(
+            compiled_form = _compile_form(
                 mass_and_stiffness,
                 jit_options=jit_options,
                 form_compiler_options=form_compiler_options,
@@ -277,7 +294,7 @@ class Function(dolfinx.fem.Function, FloatingType):
             u = ufl.TrialFunction(self.function_space)
             v = ufl.TestFunction(self.function_space)
             riesz_form = ufl.inner(u, v) * ufl.dx
-            compiled_riesz = dolfinx.fem.form(
+            compiled_riesz = _compile_form(
                 riesz_form,
                 jit_options=options.get("jit_options", None),
                 form_compiler_options=options.get("form_compiler_options", None),
@@ -297,7 +314,7 @@ class Function(dolfinx.fem.Function, FloatingType):
             u = ufl.TrialFunction(self.function_space)
             v = ufl.TestFunction(self.function_space)
             riesz_form = ufl.inner(u, v) * ufl.dx + ufl.inner(ufl.grad(u), ufl.grad(v)) * ufl.dx
-            compiled_riesz = dolfinx.fem.form(
+            compiled_riesz = _compile_form(
                 riesz_form,
                 jit_options=options.get("jit_options", None),
                 form_compiler_options=options.get("form_compiler_options", None),

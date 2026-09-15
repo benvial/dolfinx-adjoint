@@ -17,6 +17,7 @@ from ..compat import bcs_by_block
 from ..types import Function
 from ..typing_utils import MaybeBlocked, MaybeBlockedMatrix, NestedSequence
 from ..ufl_utils import assign_mixed_parts, sum_form
+from ..utils import _compile_form, _refuse_second_order_adjoint_under_complex
 from .assembly import _create_vector, _SpecialVector, _vector, assemble_compiled_form
 
 if typing.TYPE_CHECKING:
@@ -589,12 +590,12 @@ class _ProblemBlockBase(pyadjoint.Block, abc.ABC):
         dFdm = -ufl.derivative(sum_res, c_rep, dc)
         if dFdm.empty():
             # Generate a dummy form to safely extract the correct Vector wrapper type
-            dFdm = dolfinx.fem.form(ufl.ZeroBaseForm((dc,)))  # type: ignore[call-overload]
+            dFdm = _compile_form(ufl.ZeroBaseForm((dc,)))  # type: ignore[call-overload]
 
         dFdm_adj = ufl.adjoint(dFdm)
         sensitivity = ufl.action(dFdm_adj, self._adjoint_solutions)
 
-        compiled_sensitivity = dolfinx.fem.form(
+        compiled_sensitivity = _compile_form(
             sensitivity,
             jit_options=self._jit_options,
             form_compiler_options=self._form_compiler_options,
@@ -768,15 +769,7 @@ class _ProblemBlockBase(pyadjoint.Block, abc.ABC):
             call. ``None`` if there is nothing to do (no dependency has a
             tangent-linear value).
         """
-        if np.issubdtype(np.dtype(dolfinx.default_scalar_type), np.complexfloating):
-            # Second-order adjoints have not been derived for complex scalars; see
-            # `AssembleBlock.evaluate_hessian_component` for why running anyway would
-            # produce a plausible but unchecked number rather than an error.
-            raise NotImplementedError(
-                "Hessians are not supported under a complex-scalar build: the second-order "
-                "adjoint has not been derived for complex scalars. First-order gradients "
-                "(ReducedFunctional.derivative) are supported."
-            )
+        _refuse_second_order_adjoint_under_complex()
         outputs = self.get_outputs()
         tlm_output = [output.tlm_value for output in outputs if output is not None]
         if len(tlm_output) == 0:

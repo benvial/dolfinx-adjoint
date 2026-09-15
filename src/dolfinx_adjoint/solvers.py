@@ -25,7 +25,7 @@ from .ufl_utils import (
     recursive_replace,
     sum_form,
 )
-from .utils import _explaining_scalar_type_mismatch
+from .utils import _compile_form, _explaining_scalar_type_mismatch
 
 # A counter incremented once per Problem construction is deterministic
 # and identical on every rank, since construction happens in lock-step
@@ -174,7 +174,7 @@ def _build_soa_self_template(
         soa_self_form = ufl.ZeroBaseForm((dFdu_template.arguments()[0],))
     else:
         soa_self_form = ufl.action(ufl.adjoint(d2Fdu2), adjoint_solution_placeholder)
-    return dolfinx.fem.form(  # type: ignore[call-overload]
+    return _compile_form(  # type: ignore[call-overload]
         soa_self_form,
         jit_options=jit_options,
         form_compiler_options=form_compiler_options,
@@ -407,7 +407,7 @@ class _ProblemBase(abc.ABC):
                 else:
                     if dFdm_c == 0 or dFdm_c.empty():
                         dFdm_c = ufl.ZeroBaseForm((test_funcs[0],))
-                templates[c] = dolfinx.fem.form(
+                templates[c] = _compile_form(
                     dFdm_c,
                     jit_options=self._jit_options,
                     form_compiler_options=self._form_compiler_options,
@@ -520,7 +520,7 @@ class _ProblemBase(abc.ABC):
             F_template, _ = self._get_or_build_residual_template()
             test_funcs = list(get_sorted_arguments(F_template.arguments(), 0))
             return [
-                dolfinx.fem.form(  # type: ignore[return-value]
+                _compile_form(  # type: ignore[return-value]
                     form_i,  # type: ignore[arg-type]
                     jit_options=self._jit_options,
                     form_compiler_options=self._form_compiler_options,
@@ -529,7 +529,7 @@ class _ProblemBase(abc.ABC):
                 for form_i in _pad_blocks_by_part(reaction_form, test_funcs)
             ]
         else:
-            return dolfinx.fem.form(
+            return _compile_form(
                 reaction_form,
                 jit_options=self._jit_options,
                 form_compiler_options=self._form_compiler_options,
@@ -588,7 +588,7 @@ class _ProblemBase(abc.ABC):
                 # padded via _pad_blocks_by_part for any row a differentiation
                 # happened to eliminate entirely.
                 soa_self = [
-                    dolfinx.fem.form(
+                    _compile_form(
                         form_i,  # type: ignore[arg-type]
                         jit_options=self._jit_options,
                         form_compiler_options=self._form_compiler_options,
@@ -647,7 +647,7 @@ class _ProblemBase(abc.ABC):
                 if not (soa_form == 0 or soa_form.empty()):
                     if blocked:
                         soa_cross_templates[c] = [
-                            dolfinx.fem.form(
+                            _compile_form(
                                 form_i,  # type: ignore[arg-type]
                                 jit_options=self._jit_options,
                                 form_compiler_options=self._form_compiler_options,
@@ -656,7 +656,7 @@ class _ProblemBase(abc.ABC):
                             for form_i in _pad_blocks_by_part(soa_form, test_funcs)
                         ]
                     else:
-                        soa_cross_templates[c] = dolfinx.fem.form(
+                        soa_cross_templates[c] = _compile_form(
                             soa_form,
                             jit_options=self._jit_options,
                             form_compiler_options=self._form_compiler_options,
@@ -674,7 +674,7 @@ class _ProblemBase(abc.ABC):
                 fixed_form = ufl.algorithms.expand_derivatives(dL2dm + d2Fdudm)
                 if fixed_form == 0 or fixed_form.empty():
                     fixed_form = ufl.ZeroBaseForm((dc,))
-                fixed_templates[c] = dolfinx.fem.form(
+                fixed_templates[c] = _compile_form(
                     fixed_form,
                     jit_options=self._jit_options,
                     form_compiler_options=self._form_compiler_options,
@@ -688,7 +688,7 @@ class _ProblemBase(abc.ABC):
                     cross_form = ufl.algorithms.expand_derivatives(ufl.derivative(dL1dm, c2_placeholder, seed2))
                     if cross_form == 0 or cross_form.empty():
                         continue
-                    cross_templates[(c, c2)] = dolfinx.fem.form(
+                    cross_templates[(c, c2)] = _compile_form(
                         cross_form,
                         jit_options=self._jit_options,
                         form_compiler_options=self._form_compiler_options,

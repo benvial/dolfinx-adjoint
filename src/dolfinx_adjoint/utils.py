@@ -6,10 +6,7 @@ import dolfinx
 import numpy
 import numpy.typing as npt
 import ufl
-from ufl.algorithms.check_arities import ArityChecker, ArityMismatch
-from ufl.algorithms.map_integrands import map_integrands
 from ufl.corealg.dag_traverser import DAGTraverser
-from ufl.corealg.map_dag import map_expr_dag
 
 from .compat import extract_linear_combination
 
@@ -216,129 +213,61 @@ def _is_complex_build() -> bool:
     return bool(numpy.issubdtype(dolfinx.default_scalar_type, numpy.complexfloating))
 
 
-def _argument_conjugation(expression: ufl.core.expr.Expr, argument: ufl.Argument) -> bool | None:
-    """Report how ``argument`` enters ``expression``: conjugated, bare, or not at all.
+def _refuse_second_order_adjoint_under_complex() -> None:
+    """Refuse a Hessian under a complex-scalar build, from the one place that says so.
+
+    The second-order adjoint has not been derived for complex scalars. The pieces that make
+    the first-order path correct are first-order-specific: the one-half Wirtinger factor in
+    {py:meth}`~dolfinx_adjoint.blocks.assembly.AssembleBlock.compute_action_adjoint` is
+    applied only to a block's own output derivative, and the ``2*Re[.]`` extraction in
+    {py:func}`dolfinx_adjoint.types.function._extract_real_parameter_gradient` is a real
+    *gradient*'s definition, not a Hessian's. Running anyway would return a plausible number
+    from a path nobody has checked, so refuse instead.
+
+    Every Hessian entry point calls this rather than raising a copy of its own, because the
+    refusal is recognised downstream by its message: ``tests/conftest.py`` turns it into a
+    skip so that a complex run reads as a column of skips rather than a spray of failures
+    across every suite that reaches a Hessian incidentally. A single producer of the message
+    keeps that recognition from drifting away from the source unnoticed.
 
     Raises:
-        ufl.algorithms.check_arities.ArityMismatch: If a sum somewhere inside the
-            expression adds a conjugated occurrence to a bare one, so that no single answer
-            describes the expression.
-    """
-    arities = map_expr_dag(ArityChecker((argument,)), expression, compress=False)
-    conjugations = {conjugated for arg, conjugated in arities if arg.number() == argument.number()}
-    if not conjugations:
-        return None
-    (conjugation,) = conjugations
-    return conjugation
-
-
-def _conjugate_argument(expression: ufl.core.expr.Expr, argument: ufl.Argument) -> ufl.core.expr.Expr:
-    """Flip whether ``argument`` counts as conjugated inside ``expression``.
-
-    The value is unchanged: the argument ranges over a real-valued (Lagrange) basis, for
-    which ``conj(phi) == phi`` pointwise. Only the conjugation UFL *records* moves, and that
-    is what the complex-mode arity rules are about.
-    """
-    return ufl.replace(expression, {argument: ufl.conj(argument)})
-
-
-def _agree_on_conjugation(expression: ufl.core.expr.Expr, argument: ufl.Argument) -> ufl.core.expr.Expr:
-    """Rewrite ``expression`` so that no sum inside it mixes conjugation states.
-
-    Descends only where the arity checker reports a mixture -- an expression it already
-    accepts is returned untouched -- and repairs each offending sum by conjugating the
-    argument in the terms that lack it.
-    """
-    try:
-        _argument_conjugation(expression, argument)
-    except ArityMismatch:
-        pass
-    else:
-        return expression
-
-    operands = [_agree_on_conjugation(operand, argument) for operand in expression.ufl_operands]
-    if isinstance(expression, ufl.classes.Sum):
-        conjugations = [_argument_conjugation(operand, argument) for operand in operands]
-        if True in conjugations and False in conjugations:
-            operands = [
-                _conjugate_argument(operand, argument) if conjugation is False else operand
-                for operand, conjugation in zip(operands, conjugations)
-            ]
-    return expression._ufl_expr_reconstruct_(*operands)
-
-
-def _conjugate_for_complex_mode(integrand: ufl.core.expr.Expr, argument: ufl.Argument) -> ufl.core.expr.Expr:
-    """Rewrite an integrand so that ``argument`` is conjugated, as complex mode requires."""
-    integrand = _agree_on_conjugation(integrand, argument)
-    if _argument_conjugation(integrand, argument) is False:
-        integrand = _conjugate_argument(integrand, argument)
-    return integrand
-
-
-def _derivative_along(form: ufl.Form, coefficient: ufl.core.expr.Expr, direction, argument) -> ufl.Form:
-    """Differentiate ``form`` along ``direction``, repaired for complex-mode arity rules."""
-    dform = ufl.algorithms.expand_derivatives(ufl.derivative(form, coefficient, direction))
-    return map_integrands(lambda integrand: _conjugate_for_complex_mode(integrand, argument), dform)
-
-
-def wirtinger_derivative_forms(
-    form: ufl.Form, coefficient: ufl.core.expr.Expr, argument: ufl.Argument
-) -> tuple[ufl.Form, ufl.Form | None]:
-    r"""Forms whose assembly gives the adjoint seed of ``form`` with respect to ``coefficient``.
-
-    Under a real-scalar build this is just ``ufl.derivative(form, coefficient, argument)``,
-    returned alone.
-
-    Under a complex-scalar build one derivative is not enough. ``form`` is a real-differentiable
-    function of a complex coefficient, so its differential splits into a holomorphic and an
-    anti-holomorphic part,
-
-    .. math::
-
-        dF = \frac{\partial F}{\partial c}\,dc + \frac{\partial F}{\partial \bar c}\,\overline{dc},
-
-    and the adjoint seed this codebase carries is :math:`\overline{\partial F/\partial c} +
-    \partial F/\partial \bar c` -- conjugated on the holomorphic part because every pairing
-    downstream of it is Hermitian ({py:func}`ufl.adjoint`), and carrying the anti-holomorphic
-    part is what lets a Functional such as :math:`|u - u_d|^2` be differentiated at all.
-
-    {py:func}`ufl.derivative` returns neither part on its own: differentiating along
-    ``argument`` gives their sum, :math:`v_1 = \partial F/\partial c + \partial F/\partial
-    \bar c` (the derivative along a *real* perturbation, since the argument ranges over a
-    real-valued basis). Differentiating along ``1j * argument`` gives
-    :math:`v_2 = i(\partial F/\partial c - \partial F/\partial \bar c)`, and the two
-    together separate the parts. The seed is then, vector by vector,
-
-    .. math::
-
-        \mathrm{Re}(v_1) + i\,\mathrm{Re}(v_2),
-
-    which callers must form themselves, having assembled both forms.
-
-    Each form is also repaired for UFL's complex-mode arity rules, which require argument
-    number 0 to appear conjugated in every term. {py:func}`ufl.derivative` leaves the direction
-    it is handed exactly as given, so the raw derivative generally violates that; conjugating
-    the direction up front instead only moves the violation to the form shapes where the
-    differentiated occurrence of ``coefficient`` sits in the second slot of an
-    {py:func}`ufl.inner`, which conjugates it a second time. The conjugation therefore has to be
-    decided per term, after differentiating. Doing so is free of numerical consequence: the
-    argument ranges over a real-valued (Lagrange) basis, so only the conjugation UFL records
-    changes, never a value.
-
-    Args:
-        form: The rank-0 form to differentiate.
-        coefficient: The coefficient to differentiate with respect to.
-        argument: The direction to differentiate in, an argument over a real-valued basis.
-    Returns:
-        The derivative along ``argument``, and -- under a complex-scalar build -- the
-        derivative along ``1j * argument``, which is ``None`` otherwise.
+        NotImplementedError: Under a complex-scalar build. Returns without effect under a
+            real one.
     """
     if not _is_complex_build():
-        return ufl.derivative(form, coefficient, argument), None
-    return (
-        _derivative_along(form, coefficient, argument, argument),
-        _derivative_along(form, coefficient, 1j * argument, argument),
+        return
+    raise NotImplementedError(
+        "Hessians are not supported under a complex-scalar build: the second-order "
+        "adjoint has not been derived for complex scalars. First-order gradients "
+        "(ReducedFunctional.derivative) are supported."
     )
+
+
+def _compile_form(
+    form: typing.Any,
+    jit_options: dict | None = None,
+    form_compiler_options: dict | None = None,
+    entity_maps: typing.Any = None,
+) -> typing.Any:
+    """Compile a form, explaining a real/complex dtype mix rather than letting it surface raw.
+
+    A thin stand-in for {py:func}`dolfinx.fem.form` with identical arguments and return
+    value, differing only in what it does on failure. Every form this package compiles goes
+    through it, so the explanation is the default rather than something each call site has to
+    remember to opt into: a dtype mix otherwise fails several layers down in the nanobind
+    bindings, in a message naming neither the dtype nor the coefficient at fault, and a
+    compile site that forgot the wrapper is indistinguishable from one that never needed it.
+
+    See {py:func}`scalar_type_mismatch_message` for what the replacement message says and
+    when there is one to say. Any other failure propagates untouched.
+    """
+    with _explaining_scalar_type_mismatch(form):
+        return dolfinx.fem.form(
+            form,
+            jit_options=jit_options,
+            form_compiler_options=form_compiler_options,
+            entity_maps=entity_maps,
+        )
 
 
 @contextlib.contextmanager

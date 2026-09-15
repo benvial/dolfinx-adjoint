@@ -1,6 +1,65 @@
+import gc
+
+from mpi4py import MPI
+
 import numpy as np
 import pyadjoint
 import pytest
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Take the cyclic garbage collector out of the loop for the duration of a parallel run.
+
+    A {py:class}`dolfinx.fem.petsc.LinearProblem`/``NonlinearProblem`` releases its PETSc
+    ``Mat``/``Vec``/``KSP``/``SNES`` objects from ``__del__``, and destroying a PETSc object is
+    collective over the communicator it was built on. That is safe as long as the object dies by
+    reference counting, which happens at the same point in the program on every rank -- the
+    invariant ``test_linear_problem_released_by_refcounting_not_gc`` exists to protect. It is not
+    safe when the object dies in a cyclic collection, because *when* the cyclic collector runs is
+    decided by each rank's own allocation counters, and those diverge.
+
+    They diverge reliably, in one specific window. ``dolfinx.jit.mpi_jit_decorator`` has rank 0
+    compile a form while every other rank waits for the result in ``comm.bcast``: rank 0 allocates
+    heavily inside FFCx, the others allocate nothing. So the collector fires on rank 0, deep inside
+    the compile, and if any Problem has become cyclic garbage by then its ``__del__`` runs there
+    and enters a collective that the waiting ranks -- sitting in a ``bcast`` on the same
+    communicator -- will never join. Both processes then spin at full CPU forever. Observed as a
+    stalled ``mpirun -n 2`` complex-scalar run whose two ranks were in exactly those two places.
+
+    Problems become cyclic garbage more easily than the refcounting invariant suggests, because a
+    cycle does not have to be one the object itself takes part in: the traceback of any exception
+    raised inside a test holds that test's frame, which holds its local Problem, and a traceback is
+    itself cyclic. A complex-scalar run raises far more of them than a real one -- every
+    second-order-adjoint refusal handled below arrives as an exception -- which is why the stall is
+    specific to the complex build even though nothing about it is.
+
+    Disabling automatic collection removes the nondeterminism rather than trying to chase the
+    cycles: nothing is finalised until ``collect_cycles_between_tests`` collects, at a point every
+    rank reaches having run the same code. Serial runs keep the collector, since with one rank
+    there is no divergence to protect against and no collective to deadlock.
+    """
+    if MPI.COMM_WORLD.size > 1:
+        gc.disable()
+
+
+@pytest.fixture(autouse=True)
+def collect_cycles_between_tests():
+    """Collect cyclic garbage at a point every rank reaches together.
+
+    The counterpart to the collector ``pytest_configure`` turns off: with automatic collection
+    disabled, cycles accumulate until something collects them, and a test boundary is the coarsest
+    place where every rank is provably at the same point in the program. Anything finalised here --
+    including the collective PETSc destructors that motivate the whole arrangement -- therefore runs
+    in the same order on every rank.
+
+    A test that needs a collection earlier than this (``test_linear_problem_rebuilt_after_garbage_collection``
+    and friends) calls {py:func}`gc.collect` itself, which works whether or not automatic collection
+    is enabled.
+    """
+    yield
+    if MPI.COMM_WORLD.size > 1:
+        gc.collect()
+
 
 _SECOND_ORDER_ADJOINT_UNDERIVED = "second-order adjoint"
 

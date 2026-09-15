@@ -7,6 +7,7 @@ from ufl.corealg.traversal import traverse_unique_terminals
 from ufl.formatting.ufl2unicode import ufl2unicode
 
 from ..types.function import Function as _Function
+from ..types.function import _extract_real_parameter_gradient
 from ..utils import assign_linear_combination, extract_linear_combination, function_from_vector
 from ._vector import _vector
 
@@ -133,17 +134,12 @@ class FunctionAssignBlock(Block):
             if isinstance(bo, AdjFloat):
                 gradient = self._compute_adjoint_of_broadcast(adj_inputs[0], self._one)
                 # An AdjFloat parameter is real-valued by construction, and pyadjoint's own
-                # AdjFloat offers no hook where the `2*Re[.]` that turns a complex adjoint
-                # seed into a real parameter's gradient could be applied -- for a Function or
-                # Constant Control that happens in
-                # {py:func}`dolfinx_adjoint.types.function._extract_real_parameter_gradient`,
-                # which pyadjoint reaches through the Control's own object. It therefore
-                # happens here instead, at the boundary where the real-valued parameter
-                # enters: everything upstream of a float is real, so taking the real part now
-                # loses nothing, and `AdjFloat(complex)` would simply raise.
-                if np.iscomplexobj(gradient):
-                    gradient = 2.0 * gradient.real
-                return gradient
+                # AdjFloat offers no Control-side hook where the `2*Re[.]` that turns a
+                # complex adjoint seed into a real parameter's gradient could be applied. It
+                # therefore happens here, at the boundary where the real-valued parameter
+                # enters -- but through the same function every other parameter kind goes
+                # through, so the rule has one implementation rather than two.
+                return _extract_real_parameter_gradient(gradient)
             elif isinstance(bo, dolfinx.fem.Function):
                 if ufl.checks.is_scalar_constant_expression(bo):
                     # Adjoint of a broadcast into a real function (constant stored as Function)
