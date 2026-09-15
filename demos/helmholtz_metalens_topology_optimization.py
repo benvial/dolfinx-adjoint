@@ -120,6 +120,7 @@
 # ## Implementation
 
 # +
+import os
 import time
 
 from mpi4py import MPI
@@ -176,6 +177,7 @@ CELLS_PER_WAVELENGTH = 10  # cell width h = WAVELENGTH / CELLS_PER_WAVELENGTH
 
 RHO_INIT = 0.5  # uniform grey: no bias towards any particular design
 LIVE_PREVIEW = False  # redraw the design and field after every optimizer iteration
+OPTIMIZER = os.environ.get("METALENS_OPTIMIZER", "L-BFGS-B")  # see "Choosing the optimizer" below
 
 DESIGN_TAG, FOCUS_TAG, BULK_TAG = 1, 2, 3
 
@@ -309,6 +311,7 @@ filter_problem = dolfinx_adjoint.LinearProblem(
     u=rho_filtered,
     petsc_options=PETSC_LU,
     adjoint_petsc_options=PETSC_LU,
+    tlm_petsc_options=PETSC_LU,
 )
 filter_problem.solve()
 
@@ -350,6 +353,7 @@ problem = dolfinx_adjoint.LinearProblem(
     bcs=[bc],
     petsc_options=PETSC_LU,
     adjoint_petsc_options=PETSC_LU,
+    tlm_petsc_options=PETSC_LU,
     entity_maps=[design_to_parent],
 )
 problem.solve()
@@ -370,14 +374,13 @@ Jhat = pyadjoint.ReducedFunctional(J, pyadjoint.Control(rho))
 print(f"intensity enhancement of the grey starting design: {-float(J):.4f}")
 # -
 
-# ## Gradient verification
+# ## Gradient and Hessian verification
 #
 # The Taylor remainder $|J(\rho + \epsilon h) - J(\rho)|$ is $\mathcal{O}(\epsilon)$, and
-# subtracting the adjoint gradient's contribution leaves $\mathcal{O}(\epsilon^2)$. Rates of 1
-# and 2 are what make this demo a validation case rather than a picture.
-#
-# Second-order Taylor tests are deliberately absent: complex-mode Hessians raise
-# {py:class}`NotImplementedError`, since nobody has derived that path yet.
+# subtracting the adjoint gradient's contribution leaves $\mathcal{O}(\epsilon^2)$. Subtracting
+# the Hessian's contribution as well leaves $\mathcal{O}(\epsilon^3)$. Rates of 1, 2 and 3 are
+# what make this demo a validation case rather than a picture -- and the third is what says the
+# Hessian-vector products the optimizer below runs on are the real thing.
 
 # +
 with pyadjoint.stop_annotating():
@@ -387,27 +390,27 @@ with pyadjoint.stop_annotating():
 
     rate_0 = pyadjoint.taylor_test(Jhat, rho, direction, dJdm=0)
     rate_1 = pyadjoint.taylor_test(Jhat, rho, direction)
+
+    # Back to `rho` before the Hessian: `taylor_test` leaves the functional evaluated at its
+    # last perturbed point, and a Hessian-vector product taken there is a correct product at
+    # the wrong base point -- which the rate-3 check then reads as a broken Hessian. The
+    # adjoint sweep is needed too, since the second-order pass runs on top of it.
+    Jhat(rho)
+    Jhat.derivative()
+    Hm = Jhat.hessian(direction)._ad_dot(direction)
+    rate_2 = pyadjoint.taylor_test(Jhat, rho, direction, Hm=Hm)
     print(f"0th-order Taylor rate (expect ~1): {rate_0:.4f}")
     print(f"1st-order Taylor rate (expect ~2): {rate_1:.4f}")
+    print(f"2nd-order Taylor rate (expect ~3): {rate_2:.4f}")
 
     gradient = Jhat.derivative()
     print(f"max |Im(dJ/drho)| (expect 0): {np.abs(gradient.x.array.imag).max():.3e}")
 # -
 
-# ## Optimization with projection continuation
+# ## Plotting
 #
-# `scipy.optimize.minimize` drives a {py:class}`pyadjoint.reduced_functional_numpy.ReducedFunctionalNumPy`.
-# L-BFGS-B rather than the `trust-constr` of the
-# [elastic topology optimization demo](./topology_optimization): that method wants Hessian-vector
-# products, which the complex path does not provide.
-#
-# The density is bounded to $[0,1]$. There is nothing to pin: it lives on the design mesh and so
-# has no degrees of freedom outside the slab to begin with.
-#
-# ```{note}
-# The NumPy optimizer interface flattens the control into one array, so this loop is written
-# for serial execution, as the elastic topology optimization demo is.
-# ```
+# Defined before the optimization loop so the live preview and the final figure are the same
+# code, and cannot drift apart.
 
 # +
 # Two triangulations, because the field and the density live on different meshes: the scattered
@@ -474,12 +477,55 @@ def plot_state(figure=None):
 
 # -
 
-# ## Optimization with projection continuation
+# ## Choosing the optimizer
 #
-# `scipy.optimize.minimize` drives a {py:class}`pyadjoint.reduced_functional_numpy.ReducedFunctionalNumPy`.
-# L-BFGS-B rather than the `trust-constr` of the
-# [elastic topology optimization demo](./topology_optimization): that method wants Hessian-vector
-# products, which the complex path does not provide.
+# `scipy.optimize.minimize` drives a {py:class}`pyadjoint.reduced_functional_numpy.ReducedFunctionalNumPy`,
+# and two of its methods accept *both* bounds and curvature information: `L-BFGS-B`, which
+# builds its own approximate curvature from the gradients it has already seen, and
+# `trust-constr`, which takes exact Hessian-vector products through `hessp=` -- the method the
+# [elastic topology optimization demo](./topology_optimization) uses. Both are available here
+# (`METALENS_OPTIMIZER` selects between them), because the adjoint now supplies exact
+# Hessian-vector products under complex scalars; the rate-3 Taylor check above is the evidence
+# that they are the real thing.
+#
+# **Measured, on this problem: `L-BFGS-B` wins, and is what this demo keeps.** Same continuation
+# schedule, same 20-iteration budget per stage, one core:
+#
+# | method         | wall-clock | final enhancement | binarized | $M_\mathrm{nd}$ |
+# |----------------|-----------:|------------------:|----------:|-----------------:|
+# | `L-BFGS-B`     |     54.5 s |           13.2440 |    6.0860 |           0.2069 |
+# | `trust-constr` |    456.0 s |           11.4785 |    4.4132 |           0.5248 |
+#
+# Eight times the wall-clock for a worse design, and a markedly greyer one.
+#
+# The cost is *not* that a Hessian-vector product is expensive in itself. One costs 431 ms here
+# against a 217 ms gradient -- almost exactly the two linear solves it should be, a
+# tangent-linear solve plus a second-order-adjoint solve. What costs is how many
+# `trust-constr` asks for: its inner Steihaug-CG took about seven per outer iteration in this
+# run (147 products over 20 iterations), so one of its iterations costs some fifteen
+# gradient-equivalents where an `L-BFGS-B` iteration costs one.
+#
+# ```{admonition} Give the tangent-linear solve its own PETSc options
+# :class: tip
+# `tlm_petsc_options=PETSC_LU` above is not decoration. `petsc_options` and
+# `adjoint_petsc_options` do not imply it, so without it the tangent-linear solve falls back to
+# a default Krylov method -- on an indefinite Helmholtz operator, which is exactly the system
+# that needs a direct solver. That single omission cost a factor of **23** per Hessian-vector
+# product (9.7 s against 431 ms) and is invisible in the gradient, which never solves a
+# tangent-linear system. Anything that takes Hessian-vector products should set all three.
+# ```
+#
+# The design quality does not pay for the time either, and that is the more interesting half.
+# `trust-constr` was behind at *equal iteration count*, not merely slower. Projection
+# continuation moves the objective at every stage boundary, so curvature bought at one $\beta$
+# is spent by the next -- a penalty a quasi-Newton method pays far less of, since its secant
+# updates are discarded and rebuilt continuously anyway. The filtered design variables are also
+# weakly coupled, which is the regime a limited-memory secant update already handles well. The
+# comparison worth making for this problem class is against a method-of-moving-asymptotes
+# solver, not a second-order trust region.
+#
+# So the point of this section is not that curvature-aware optimization wins here. It is that
+# the choice is now available and measured, where before it was closed off.
 #
 # The density is bounded to $[0,1]$. There is nothing to pin: it lives on the design mesh and so
 # has no degrees of freedom outside the slab to begin with.
@@ -508,6 +554,14 @@ def record_iterate(intermediate_result):
         plt.pause(0.01)
 
 
+OPTIMIZERS = {
+    "L-BFGS-B": {"options": {"maxiter": ITERATIONS_PER_STAGE, "maxcor": 20}},
+    "trust-constr": {
+        "hessp": lambda m, p: rf_np.hessian(p),
+        "options": {"maxiter": ITERATIONS_PER_STAGE, "gtol": 0.0, "xtol": 0.0},
+    },
+}
+
 start = time.perf_counter()
 for stage_beta in BETA_STAGES:
     beta.value = dolfinx.default_scalar_type(stage_beta)
@@ -515,10 +569,10 @@ for stage_beta in BETA_STAGES:
         rf_np.__call__,
         rf_np.get_controls(),
         jac=lambda m: rf_np.derivative(),
-        method="L-BFGS-B",
+        method=OPTIMIZER,
         bounds=scipy.optimize.Bounds(0.0, 1.0),
-        options={"maxiter": ITERATIONS_PER_STAGE, "maxcor": 20},
         callback=record_iterate,
+        **OPTIMIZERS[OPTIMIZER],
     )
     rho.x.array[:num_owned] = result.x
     rho.x.scatter_forward()
