@@ -411,3 +411,164 @@ def test_dtype_diagnostic_declines_rather_than_raises_on_a_non_form(mesh, V, not
 
     assert scalar_type_mismatch_message(not_a_ufl_form) is None
     assert scalar_type_mismatch_message([not_a_ufl_form, None]) is None
+
+
+def _pml_metalens(mesh_size: int, seed: int):
+    """A miniature of `demos/helmholtz_metalens_topology_optimization.py`.
+
+    Returns `(rho, beta, J, keepalive)`: the density control, the projection-sharpness
+    `Constant`, the objective, and the objects that must outlive the tape.
+
+    The starting density is random rather than the demo's uniform grey, for two reasons: the
+    geometry is symmetric about `y = 0`, so a uniform base point lets a wrong gradient cancel
+    itself by parity; and the projection maps 0.5 to 0.5 for every sharpness, which would make
+    `beta` unobservable. Every material constant is the demo's, so that the two copies of this
+    physics drift visibly rather than silently -- nothing executes the demo itself, since it is
+    kept out of `_toc.yml` (the documentation is built in real mode). The one thing that does not
+    carry over is what those constants buy: this mesh is far coarser, so the filter here is a
+    sub-element smoother rather than the minimum length scale it imposes in the demo. That is
+    irrelevant to what is being checked, which is that the adjoint crosses the filter solve.
+
+    This is the demo's whole chain at a mesh coarse enough to run in a test, and it is the
+    only place in this file where the control reaches the Functional through the *bilinear*
+    form rather than the right-hand side, through a second recorded solve, and against an
+    operator carrying genuinely complex (PML) coefficients.
+    """
+    wavelength = 1.0
+    k0 = 2.0 * np.pi / wavelength
+    pml_width, x_phys, y_phys = 0.5, 1.0, 0.8
+    lx, ly = x_phys + pml_width, y_phys + pml_width
+    design, focus_centre, focus_radius = (-0.25, 0.25, -0.6, 0.6), (0.6, 0.0), 0.15
+    eps_material, pml_strength, penal, filter_radius = 4.0, 4.0, 3.0, 0.10
+    design_tag, focus_tag, bulk_tag = 1, 2, 3
+
+    msh = dolfinx.mesh.create_rectangle(
+        MPI.COMM_WORLD,
+        [np.array([-lx, -ly]), np.array([lx, ly])],
+        (int(2 * lx * mesh_size), int(2 * ly * mesh_size)),
+        dolfinx.mesh.CellType.triangle,
+    )
+    tdim = msh.topology.dim
+    design_cells = dolfinx.mesh.locate_entities(
+        msh, tdim, lambda x: (x[0] > design[0]) & (x[0] < design[1]) & (x[1] > design[2]) & (x[1] < design[3])
+    )
+    focus_cells = dolfinx.mesh.locate_entities(
+        msh, tdim, lambda x: (x[0] - focus_centre[0]) ** 2 + (x[1] - focus_centre[1]) ** 2 < focus_radius**2
+    )
+    index_map = msh.topology.index_map(tdim)
+    markers = np.full(index_map.size_local + index_map.num_ghosts, bulk_tag, dtype=np.int32)
+    markers[design_cells] = design_tag
+    markers[focus_cells] = focus_tag
+    cell_tags = dolfinx.mesh.meshtags(msh, tdim, np.arange(markers.size, dtype=np.int32), markers)
+    dx = ufl.Measure("dx", domain=msh, subdomain_data=cell_tags)
+
+    Vf = dolfinx.fem.functionspace(msh, ("Lagrange", 2))
+    Q = dolfinx.fem.functionspace(msh, ("Lagrange", 1))
+    x = ufl.SpatialCoordinate(msh)
+
+    def stretch(coordinate, half_width):
+        return 1.0 + 1j * pml_strength * (ufl.max_value(abs(coordinate) - half_width, 0.0) / pml_width) ** 2
+
+    sx, sy = stretch(x[0], x_phys), stretch(x[1], y_phys)
+    pml_tensor = ufl.as_matrix([[sy / sx, 0], [0, sx / sy]])
+    pml_scale = sx * sy
+    incident = ufl.exp(1j * k0 * x[0])
+
+    rho = Function(Q, name="density")
+    rho.x.array[:] = np.random.default_rng(seed).uniform(0.0, 1.0, size=rho.x.array.size)
+    rho.x.scatter_forward()
+
+    # Helmholtz density filter: a second recorded solve between the control and the operator.
+    trial_rho, w = ufl.TrialFunction(Q), ufl.TestFunction(Q)
+    rho_filtered = Function(Q, name="filtered_density")
+    filter_problem = LinearProblem(
+        (filter_radius**2 * ufl.inner(ufl.grad(trial_rho), ufl.grad(w)) + ufl.inner(trial_rho, w)) * ufl.dx,
+        ufl.inner(rho, w) * ufl.dx,
+        u=rho_filtered,
+        petsc_options=_PETSC_LU,
+        adjoint_petsc_options=_PETSC_LU,
+    )
+    filter_problem.solve()
+
+    beta, eta = dolfinx.fem.Constant(msh, dolfinx.default_scalar_type(4.0)), 0.5
+    projected = (ufl.tanh(beta * eta) + ufl.tanh(beta * (rho_filtered - eta))) / (
+        ufl.tanh(beta * eta) + ufl.tanh(beta * (1 - eta))
+    )
+    permittivity = 1.0 + projected**penal * (eps_material - 1.0)
+
+    scattered = Function(Vf, name="scattered_field")
+    u, v = ufl.TrialFunction(Vf), ufl.TestFunction(Vf)
+    a = (
+        ufl.inner(pml_tensor * ufl.grad(u), ufl.grad(v)) - k0**2 * pml_scale * ufl.inner(u, v)
+    ) * dx - k0**2 * ufl.inner((permittivity - 1.0) * u, v) * dx(design_tag)
+    L = k0**2 * ufl.inner((permittivity - 1.0) * incident, v) * dx(design_tag)
+
+    msh.topology.create_connectivity(tdim - 1, tdim)
+    outer_facets = dolfinx.mesh.exterior_facet_indices(msh.topology)
+    bc = dolfinx.fem.dirichletbc(
+        dolfinx.default_scalar_type(0.0),
+        dolfinx.fem.locate_dofs_topological(Vf, tdim - 1, outer_facets),
+        Vf,
+    )
+    problem = LinearProblem(a, L, u=scattered, bcs=[bc], petsc_options=_PETSC_LU, adjoint_petsc_options=_PETSC_LU)
+    problem.solve()
+
+    total = scattered + incident
+    focus_area = assemble_scalar(1.0 * dx(focus_tag), annotate=False)
+    J = -assemble_scalar(ufl.inner(total, total) * dx(focus_tag)) / focus_area
+    return rho, beta, J, (problem, filter_problem)
+
+
+def test_metalens_design_chain_gradient_converges_at_second_order():
+    """The spec's validation case: a real density control inside a complex PML operator.
+
+    Every other test in this file puts the control in the right-hand side, where the adjoint
+    never differentiates the operator. Here the control reaches the Functional only through
+    the sesquilinear form's permittivity, so the sensitivity comes from `ufl.adjoint` applied
+    to a derivative of the operator -- the Load-bearing block's other half.
+    """
+    pyadjoint.get_working_tape().clear_tape()
+    rho, _, J, keepalive = _pml_metalens(mesh_size=8, seed=7)
+    assert isinstance(J, float)
+
+    Jhat = pyadjoint.ReducedFunctional(J, pyadjoint.Control(rho))
+    h = Function(rho.function_space)
+    h.x.array[:] = np.random.default_rng(7).standard_normal(h.x.array.size)
+    h.x.scatter_forward()
+
+    with pyadjoint.stop_annotating():
+        # The direct check the rest of this file makes, first: the Taylor rates below only
+        # constrain how the remainder shrinks, and a gradient wrong by a constant factor can
+        # still produce a clean rate of 2. `|E|**2` is quadratic in the state, hence in the
+        # control, so the central difference is used rather than the forward one.
+        gradient = Jhat.derivative()
+        assert np.isclose(gradient._ad_dot(h), _central_difference(Jhat, rho, h), rtol=1e-5, atol=1e-10)
+
+        # The gradient stays in the control's complex dtype but is mathematically real, and is
+        # not the zero vector, which would satisfy every other assertion here for free.
+        assert np.issubdtype(gradient.x.array.dtype, np.complexfloating)
+        assert np.allclose(gradient.x.array.imag, 0.0, atol=1e-12)
+        assert np.abs(gradient.x.array.real).max() > 0.0
+
+        assert np.isclose(pyadjoint.taylor_test(Jhat, rho, h, dJdm=0), 1.0, atol=0.15)
+        assert np.isclose(pyadjoint.taylor_test(Jhat, rho, h), 2.0, atol=0.15)
+    del keepalive
+
+
+def test_projection_sharpness_is_replayed_from_its_constant():
+    """`beta` is a plain DOLFINx `Constant`, so continuation must not need a re-recorded tape.
+
+    The optimization loop in the demo raises `beta` between stages while reusing one
+    `ReducedFunctional`. That only works if the recorded blocks read the `Constant`'s value at
+    replay time rather than having baked it in when the form was compiled.
+    """
+    pyadjoint.get_working_tape().clear_tape()
+    rho, beta, J, keepalive = _pml_metalens(mesh_size=8, seed=11)
+
+    Jhat = pyadjoint.ReducedFunctional(J, pyadjoint.Control(rho))
+    at_beta_4 = Jhat(rho)
+    beta.value = dolfinx.default_scalar_type(32.0)
+    at_beta_32 = Jhat(rho)
+
+    assert not np.isclose(at_beta_4, at_beta_32), "raising beta changed nothing, so it was baked into the form"
+    del keepalive
