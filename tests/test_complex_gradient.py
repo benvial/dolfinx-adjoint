@@ -419,20 +419,27 @@ def test_hessian_of_a_state_intensity_matches_finite_difference(mesh, V, assert_
     del problem
 
 
-def test_hessian_is_unchanged_by_the_order_of_a_squared_misfit(mesh, V, target):
-    """`inner(a, b)` and `inner(b, a)` are conjugates, so they have the same real part and
-    therefore the same Hessian -- the second-order counterpart of the first-order test above.
-    A seed that conjugated one Wirtinger part but not the other would split them apart.
+def test_hessian_is_unchanged_by_the_order_of_a_misfit(mesh, V, target):
+    """`inner(a, b)` and `inner(b, a)` are conjugates of one another, so a misfit built from
+    either order has the same real part -- and therefore the same Hessian. The second-order
+    counterpart of `test_gradient_is_unchanged_by_the_order_of_a_squared_misfit`, and the check
+    that would catch a seed conjugating one Wirtinger part but not the other.
+
+    The swap has to be of `ufl.inner`'s own two slots, which is what makes the two functionals a
+    conjugate pair; negating both arguments of one `inner` (`inner(u - t, u - t)` against
+    `inner(t - u, t - u)`) looks like a swap but is the identity, since `inner` conjugates its
+    second slot and the two signs cancel.
+
+    The control goes in the operator because `inner(uh, target)` is linear in the state: with
+    the control in the right-hand side the Hessian would be exactly zero, and two zeros agree
+    for free.
     """
     products = []
-    for misfit in (
-        lambda u: ufl.inner(u - target, u - target),
-        lambda u: ufl.inner(target - u, target - u),
-    ):
+    for order in (lambda a, b: ufl.inner(a, b), lambda a, b: ufl.inner(b, a)):
         pyadjoint.get_working_tape().clear_tape()
         f, h = _random_pair(V, seed=13)
-        problem, uh = _solve_helmholtz(mesh, V, f)
-        Jhat = pyadjoint.ReducedFunctional(assemble_scalar(misfit(uh) * ufl.dx), pyadjoint.Control(f))
+        problem, uh = _solve_helmholtz(mesh, V, ufl.as_ufl(1.0), potential=f)
+        Jhat = pyadjoint.ReducedFunctional(assemble_scalar(order(uh, target) * ufl.dx), pyadjoint.Control(f))
         Jhat.derivative()
         products.append(Jhat.hessian(h)._ad_dot(h))
         del problem

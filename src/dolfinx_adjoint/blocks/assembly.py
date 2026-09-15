@@ -110,7 +110,7 @@ def _assemble_wirtinger_seed(
     jit_options: dict | None = None,
     form_compiler_options: dict | None = None,
     entity_maps: typing.Any = None,
-) -> tuple[_SpecialVector, ufl.Form]:
+) -> _SpecialVector:
     r"""Assemble the adjoint seed of a rank-0 ``form`` with respect to ``coefficient``.
 
     The one place a seed is derived and assembled, so that the difference between the two
@@ -130,8 +130,7 @@ def _assemble_wirtinger_seed(
         entity_maps: Relations between the meshes of the form's arguments and coefficients.
 
     Returns:
-        The assembled seed, and the derivative form along ``argument`` -- which the
-        second-order path differentiates a second time.
+        The assembled seed.
     """
     dform, dform_imaginary_direction = _wirtinger_derivative_forms(form, coefficient, argument)
     assert isinstance(dform, ufl.Form), "dform must be a UFL form."
@@ -159,7 +158,7 @@ def _assemble_wirtinger_seed(
             entity_maps=entity_maps,
         )
         vector.array[:] = vector.array.real + 1j * imaginary_direction_vector.array.real
-    return vector, dform
+    return vector
 
 
 def assemble_compiled_form(
@@ -281,7 +280,7 @@ class AssembleBlock(Block):
                 # not carry enough information to seed the adjoint, and the one UFL produces
                 # breaks its own complex-mode arity rules. See
                 # {py:func}`_assemble_wirtinger_seed`.
-                vector, dform = _assemble_wirtinger_seed(
+                vector = _assemble_wirtinger_seed(
                     form,
                     c_rep,
                     ufl.TestFunction(space),
@@ -328,7 +327,7 @@ class AssembleBlock(Block):
             # seed bound for a Block further upstream, so its real part must not be taken
             # here. The `2*Re[.]` that turns an accumulated seed into a real parameter's
             # gradient happens once, at the Control, in `Function._ad_convert_riesz`.
-            return vector, dform
+            return vector
             # Return a Vector scaled by the scalar `adj_input`
             # self._cached_vectors[id(space)].array[:] *= adj_input
             # self._cached_vectors[id(space)].scatter_forward()
@@ -388,7 +387,7 @@ class AssembleBlock(Block):
         #     c_rep = dolfin.SpatialCoordinate(c_rep)
         #     space = c._ad_function_space()
 
-        return self.compute_action_adjoint(adj_input, arity_form, form, c_rep, space)[0]
+        return self.compute_action_adjoint(adj_input, arity_form, form, c_rep, space)
 
     def prepare_evaluate_tlm(self, inputs, tlm_inputs, relevant_outputs):
         return self.prepare_evaluate_adj(inputs, tlm_inputs, self.get_dependencies())
@@ -460,7 +459,7 @@ class AssembleBlock(Block):
         #     space = c1._ad_function_space()
         else:
             return None
-        hessian_outputs = self.compute_action_adjoint(hessian_input, arity_form, form, c1_rep, space)[0]
+        hessian_outputs = self.compute_action_adjoint(hessian_input, arity_form, form, c1_rep, space)
 
         # The remaining term seeds `c1` from this block's output *derivative* in the
         # tangent-linear direction, rather than from the output itself. That derivative is
@@ -475,7 +474,11 @@ class AssembleBlock(Block):
         # form handed in as `dform` gets neither, since by then the seed it stands for has
         # already been decided. The two constructions agree term by term under a real build,
         # where differentiation simply commutes.
-        tlm_form = 0.0
+        # ZeroBaseForm rather than 0.0 as the identity to sum onto: a dependency with no
+        # tangent-linear value contributes nothing, and starting from a float would leave the
+        # sum a float in the case where *every* dependency does, which then needs testing for
+        # separately from an empty form.
+        tlm_form = ufl.ZeroBaseForm(())
         for other_idx, bv in relevant_dependencies:
             c2_rep = bv.saved_output
             tlm_input = bv.tlm_value
@@ -488,11 +491,10 @@ class AssembleBlock(Block):
                 tlm_form += ufl.derivative(form, X, tlm_input)
             else:
                 tlm_form += ufl.derivative(form, c2_rep, tlm_input)
-        if not isinstance(tlm_form, float):
-            tlm_form = ufl.algorithms.expand_derivatives(tlm_form)
+        tlm_form = ufl.algorithms.expand_derivatives(tlm_form)
 
-        if not isinstance(tlm_form, float) and not tlm_form.empty():
-            adj_action = self.compute_action_adjoint(adj_input, arity_form, tlm_form, c1_rep, space)[0]
+        if not tlm_form.empty():
+            adj_action = self.compute_action_adjoint(adj_input, arity_form, tlm_form, c1_rep, space)
             try:
                 hessian_outputs += adj_action
             except TypeError:
