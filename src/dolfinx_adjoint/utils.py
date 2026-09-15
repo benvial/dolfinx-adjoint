@@ -213,36 +213,6 @@ def _is_complex_build() -> bool:
     return bool(numpy.issubdtype(dolfinx.default_scalar_type, numpy.complexfloating))
 
 
-def _refuse_second_order_adjoint_under_complex() -> None:
-    """Refuse a Hessian under a complex-scalar build, from the one place that says so.
-
-    The second-order adjoint has not been derived for complex scalars. The pieces that make
-    the first-order path correct are first-order-specific: the one-half Wirtinger factor in
-    {py:meth}`~dolfinx_adjoint.blocks.assembly.AssembleBlock.compute_action_adjoint` is
-    applied only to a block's own output derivative, and the ``2*Re[.]`` extraction in
-    {py:func}`dolfinx_adjoint.types.function._extract_real_parameter_gradient` is a real
-    *gradient*'s definition, not a Hessian's. Running anyway would return a plausible number
-    from a path nobody has checked, so refuse instead.
-
-    Every Hessian entry point calls this rather than raising a copy of its own, because the
-    refusal is recognised downstream by its message: ``tests/conftest.py`` turns it into a
-    skip so that a complex run reads as a column of skips rather than a spray of failures
-    across every suite that reaches a Hessian incidentally. A single producer of the message
-    keeps that recognition from drifting away from the source unnoticed.
-
-    Raises:
-        NotImplementedError: Under a complex-scalar build. Returns without effect under a
-            real one.
-    """
-    if not _is_complex_build():
-        return
-    raise NotImplementedError(
-        "Hessians are not supported under a complex-scalar build: the second-order "
-        "adjoint has not been derived for complex scalars. First-order gradients "
-        "(ReducedFunctional.derivative) are supported."
-    )
-
-
 def _compile_form(
     form: typing.Any,
     jit_options: dict | None = None,

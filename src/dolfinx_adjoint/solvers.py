@@ -19,6 +19,7 @@ from .petsc_utils import HomogeneousBCLinearProblem
 from .types import Function
 from .typing_utils import MaybeBlocked, MaybeBlockedMatrix
 from .ufl_utils import (
+    _conjugate_hermitian_pairing,
     assign_mixed_parts,
     compute_adjoint,
     get_sorted_arguments,
@@ -671,7 +672,13 @@ class _ProblemBase(abc.ABC):
                 dL1dm = ufl.derivative(L1, c_placeholder, dc)
                 dL2dm = ufl.derivative(L2, c_placeholder, dc)
                 d2Fdudm = ufl.algorithms.expand_derivatives(ufl.derivative(dL1dm, state_arg, self._hessian_u_seed))
-                fixed_form = ufl.algorithms.expand_derivatives(dL2dm + d2Fdudm)
+                # L1/L2 contract the residual against an adjoint solution, which a complex
+                # build pairs the other way round from the seed convention -- see
+                # ufl_utils._conjugate_hermitian_pairing. A real build returns these
+                # untouched.
+                fixed_form = ufl.algorithms.expand_derivatives(
+                    _conjugate_hermitian_pairing(dL2dm) + _conjugate_hermitian_pairing(d2Fdudm)
+                )
                 if fixed_form == 0 or fixed_form.empty():
                     fixed_form = ufl.ZeroBaseForm((dc,))
                 fixed_templates[c] = _compile_form(
@@ -685,7 +692,9 @@ class _ProblemBase(abc.ABC):
                 # dependency c2's tangent-linear direction, reusing dL1dm.
                 for c2, c2_placeholder in self._value_placeholders.items():
                     seed2 = seed_placeholders[c2]
-                    cross_form = ufl.algorithms.expand_derivatives(ufl.derivative(dL1dm, c2_placeholder, seed2))
+                    cross_form = ufl.algorithms.expand_derivatives(
+                        _conjugate_hermitian_pairing(ufl.derivative(dL1dm, c2_placeholder, seed2))
+                    )
                     if cross_form == 0 or cross_form.empty():
                         continue
                     cross_templates[(c, c2)] = _compile_form(

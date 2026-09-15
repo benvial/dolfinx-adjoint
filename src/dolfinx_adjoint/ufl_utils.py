@@ -219,6 +219,40 @@ def recursive_replace(
     return [recursive_replace(f, placeholders) for f in form]
 
 
+def _conjugate_hermitian_pairing(form: ufl.Form) -> ufl.Form:
+    r"""Conjugate a form built by contracting a residual against an adjoint solution.
+
+    ``ufl.action(F, lmbda)`` substitutes an adjoint solution into a residual's test-function
+    slot, and a sesquilinear residual is conjugate-linear there, so the result is the pairing
+    :math:`\lambda^H F` rather than the :math:`(\cdot)^H \lambda` this package's seeds are
+    defined by. Differentiating that pairing with respect to a control, along a test function
+    of the control's space, therefore produces the *conjugate* of the seed wanted -- and a
+    form that is linear, rather than conjugate-linear, in its own test function, which is
+    exactly what UFL's complex-mode arity rules reject.
+
+    Conjugating the whole integrand fixes both at once, and fixes them for the same reason:
+    the seed and its arity are two views of the same conjugation. It is exact rather than a
+    relabelling -- unlike {py:func}`_conjugate_for_complex_mode`, which moves the conjugation
+    UFL records without changing a value -- because a real directional derivative commutes
+    with conjugation, so conjugating the contracted form conjugates every derivative of it
+    too, however many were taken and in whatever directions.
+
+    The first-order control path does not need this: it differentiates the residual *before*
+    contracting, so {py:func}`ufl.adjoint` conjugates on its behalf. Only the second-order
+    templates, which differentiate an already-contracted rank-0 form, arrive here.
+
+    Args:
+        form: The contracted form, or a derivative of one.
+
+    Returns:
+        The conjugated form under a complex-scalar build; ``form`` unchanged under a real one,
+        where conjugation is the identity and UFL imposes no arity rule to repair.
+    """
+    if not _is_complex_build():
+        return form
+    return map_integrands(ufl.conj, form)
+
+
 def _argument_conjugation(expression: ufl.core.expr.Expr, argument: ufl.Argument) -> bool | None:
     """Report how ``argument`` enters ``expression``: conjugated, bare, or not at all.
 

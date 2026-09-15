@@ -15,9 +15,10 @@ import numpy as np
 import pyadjoint
 import pytest
 import ufl
+from ufl.algorithms.check_arities import ArityMismatch
 
-from dolfinx_adjoint import Constant, Function, assemble_scalar, interpolate
-from dolfinx_adjoint.solvers import LinearProblem
+from dolfinx_adjoint import Constant, Function, assemble_scalar, assign, dirichletbc, interpolate
+from dolfinx_adjoint.solvers import LinearProblem, NonlinearProblem
 from dolfinx_adjoint.utils import scalar_type_mismatch_message
 
 complex_only = pytest.mark.skipif(
@@ -57,17 +58,24 @@ def target(V):
     return t
 
 
-def _solve_helmholtz(mesh, V, source) -> tuple[LinearProblem, Function]:
+def _solve_helmholtz(mesh, V, source, potential=None) -> tuple[LinearProblem, Function]:
     """A complex sesquilinear Helmholtz solve driven by ``source``.
 
     ``k`` is given a small imaginary part so the operator is genuinely complex (damped)
     rather than a real operator that merely happens to be stored in a complex dtype.
+
+    ``potential``, when given, is an extra coefficient inside the *operator*. A control in
+    ``source`` alone leaves the solve affine in the control, so its Hessian is exactly zero
+    and would validate nothing; a control in the potential makes the state a genuinely
+    nonlinear function of it while the PDE stays linear in the state.
     """
     uh = Function(V, name="state")
     u = ufl.TrialFunction(V)
     v = ufl.TestFunction(V)
     k = dolfinx.default_scalar_type(4.0 + 0.5j)  # type: ignore[arg-type]
     a = (ufl.inner(ufl.grad(u), ufl.grad(v)) - k**2 * ufl.inner(u, v)) * ufl.dx
+    if potential is not None:
+        a += ufl.inner(potential * u, v) * ufl.dx
     L = ufl.inner(source, v) * ufl.dx
 
     mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
@@ -337,20 +345,319 @@ def test_gradient_through_a_complex_coefficient_interpolation_matches_finite_dif
     del problem
 
 
-def test_hessian_is_refused_under_complex_scalars(mesh, V, target):
-    pyadjoint.get_working_tape().clear_tape()
+def _random_pair(V, seed, low=-1.0, high=1.0):
+    """A base point and a direction, both real-valued but stored in the build's dtype."""
+    rng = np.random.default_rng(seed)
+    made = []
+    for _ in range(2):
+        g = Function(V)
+        g.x.array[:] = rng.uniform(low, high, size=g.x.array.shape)
+        g.x.scatter_forward()
+        made.append(g)
+    return made
 
-    f = Function(V, name="control")
-    f.x.array[:] = 1.0
-    problem, uh = _solve_helmholtz(mesh, V, f)
+
+def test_hessian_through_a_linear_solve_matches_finite_difference(
+    mesh, V, target, assert_hessian_matches_finite_difference
+):
+    """A Functional holomorphic in the state, with the control inside the operator.
+
+    Holomorphic because `ufl.inner` conjugates its *second* argument, so `inner(uh, target)`
+    carries `uh` unconjugated throughout. The control sits in the operator rather than the
+    right-hand side because a control in the right-hand side leaves this Functional affine in
+    it, and an exactly zero Hessian would pass any accuracy check for free.
+    """
+    pyadjoint.get_working_tape().clear_tape()
+    f, h = _random_pair(V, seed=10)
+
+    problem, uh = _solve_helmholtz(mesh, V, ufl.as_ufl(1.0), potential=f)
     J = assemble_scalar(ufl.inner(uh, target) * ufl.dx)
     Jhat = pyadjoint.ReducedFunctional(J, pyadjoint.Control(f))
 
+    assert_hessian_matches_finite_difference(Jhat, f, h, fd_eps=1e-4, rtol=1e-5, atol=1e-12)
+    assert abs(Jhat.hessian(h)._ad_dot(h)) > 0.0, "a zero Hessian would satisfy the check for free"
+    del problem
+
+
+def test_hessian_of_a_non_holomorphic_misfit_matches_finite_difference(
+    mesh, V, target, assert_hessian_matches_finite_difference
+):
+    """`|uh - target|**2`, the misfit people actually write.
+
+    Neither holomorphic nor anti-holomorphic in the state, so -- exactly as at first order --
+    the adjoint seed has to carry both Wirtinger derivatives. At second order it is the
+    *directional derivative* of the Functional that is seeded that way, and the two Wirtinger
+    parts are taken of that.
+    """
+    pyadjoint.get_working_tape().clear_tape()
+    f, h = _random_pair(V, seed=11)
+
+    problem, uh = _solve_helmholtz(mesh, V, f)
+    J = assemble_scalar(ufl.inner(uh - target, uh - target) * ufl.dx)
+    Jhat = pyadjoint.ReducedFunctional(J, pyadjoint.Control(f))
+
+    assert_hessian_matches_finite_difference(Jhat, f, h, fd_eps=1e-4, rtol=1e-5, atol=1e-12)
+    assert abs(Jhat.hessian(h)._ad_dot(h)) > 0.0
+    del problem
+
+
+def test_hessian_of_a_state_intensity_matches_finite_difference(mesh, V, assert_hessian_matches_finite_difference):
+    """`|uh|**2` with the control in the operator, which is the metalens demo's shape.
+
+    Both sources of curvature at once: the Functional is quadratic in the state and the state
+    is a nonlinear function of the control.
+    """
+    pyadjoint.get_working_tape().clear_tape()
+    f, h = _random_pair(V, seed=12)
+
+    problem, uh = _solve_helmholtz(mesh, V, ufl.as_ufl(1.0), potential=f)
+    J = assemble_scalar(ufl.inner(uh, uh) * ufl.dx)
+    Jhat = pyadjoint.ReducedFunctional(J, pyadjoint.Control(f))
+
+    assert_hessian_matches_finite_difference(Jhat, f, h, fd_eps=1e-4, rtol=1e-5, atol=1e-12)
+    assert abs(Jhat.hessian(h)._ad_dot(h)) > 0.0
+    del problem
+
+
+def test_hessian_is_unchanged_by_the_order_of_a_squared_misfit(mesh, V, target):
+    """`inner(a, b)` and `inner(b, a)` are conjugates, so they have the same real part and
+    therefore the same Hessian -- the second-order counterpart of the first-order test above.
+    A seed that conjugated one Wirtinger part but not the other would split them apart.
+    """
+    products = []
+    for misfit in (
+        lambda u: ufl.inner(u - target, u - target),
+        lambda u: ufl.inner(target - u, target - u),
+    ):
+        pyadjoint.get_working_tape().clear_tape()
+        f, h = _random_pair(V, seed=13)
+        problem, uh = _solve_helmholtz(mesh, V, f)
+        Jhat = pyadjoint.ReducedFunctional(assemble_scalar(misfit(uh) * ufl.dx), pyadjoint.Control(f))
+        Jhat.derivative()
+        products.append(Jhat.hessian(h)._ad_dot(h))
+        del problem
+
+    assert np.isclose(products[0], products[1], rtol=1e-10, atol=1e-14)
+    assert abs(products[0]) > 0.0
+
+
+def test_hessian_with_a_constant_control_matches_finite_difference(
+    mesh, V, target, assert_hessian_matches_finite_difference
+):
+    """A `Constant` control, which reaches the Hessian through the Real space rather than a
+    mesh-resolved one -- the same distinction the first-order suite carries.
+    """
+    pyadjoint.get_working_tape().clear_tape()
+
+    alpha = Constant(mesh, 2.0)
+    source = Function(V, name="source")
+    source.interpolate(lambda x: np.sin(np.pi * x[0]) + 0.3 * x[0])
+
+    problem, uh = _solve_helmholtz(mesh, V, source, potential=alpha)
+    Jhat = pyadjoint.ReducedFunctional(assemble_scalar(ufl.inner(uh, target) * ufl.dx), pyadjoint.Control(alpha))
+
+    h = alpha._ad_copy()
+    h.x.array[:] = 1.0
+    assert_hessian_matches_finite_difference(Jhat, alpha, h, fd_eps=1e-4, rtol=1e-5, atol=1e-12)
+    assert abs(Jhat.hessian(h)._ad_dot(h)) > 0.0
+    del problem
+
+
+def test_hessian_through_a_nonlinear_solve_matches_finite_difference(
+    mesh, V, target, assert_hessian_matches_finite_difference
+):
+    """A residual with a genuine second derivative in the state.
+
+    `uh**3` is holomorphic in `uh`, which is what keeps it inside the Sesquilinear phase: a
+    holomorphic residual has a holomorphic Jacobian and a holomorphic second derivative, so
+    the second-order-adjoint self-term needs no Wirtinger splitting of its own. The linear
+    solves above leave that term structurally zero, so this is the only test here that
+    exercises it.
+    """
+    pyadjoint.get_working_tape().clear_tape()
+    f, h = _random_pair(V, seed=14, low=0.4, high=0.6)
+
+    uh = Function(V, name="state")
+    v = ufl.TestFunction(V)
+    k = dolfinx.default_scalar_type(4.0 + 0.5j)  # type: ignore[arg-type]
+    residual = (
+        ufl.inner(ufl.grad(uh), ufl.grad(v)) - k**2 * ufl.inner(uh, v) + ufl.inner(uh**3, v) - ufl.inner(f, v)
+    ) * ufl.dx
+
+    mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
+    facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
+    bc = dolfinx.fem.dirichletbc(
+        dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(0.0)),
+        dolfinx.fem.locate_dofs_topological(V, mesh.topology.dim - 1, facets),
+        V,
+    )
+    problem = NonlinearProblem(
+        residual,
+        uh,
+        bcs=[bc],
+        petsc_options=_PETSC_LU,
+        adjoint_petsc_options=_PETSC_LU,
+        tlm_petsc_options=_PETSC_LU,
+    )
+    problem.solve()
+
+    Jhat = pyadjoint.ReducedFunctional(
+        assemble_scalar(ufl.inner(uh - target, uh - target) * ufl.dx), pyadjoint.Control(f)
+    )
+    assert_hessian_matches_finite_difference(Jhat, f, h, fd_eps=1e-4, rtol=1e-5, atol=1e-12)
+    assert abs(Jhat.hessian(h)._ad_dot(h)) > 0.0
+    del problem
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
+@pytest.mark.skipif(
+    MPI.COMM_WORLD.size > 1,
+    reason=(
+        "Deadlocks in parallel, upstream: dolfinx.jit.mpi_jit_decorator has rank 0 compile and "
+        "broadcast the outcome under `except Exception`, but UFL raises ArityMismatch from "
+        "BaseException -- so rank 0 leaves the decorator without reaching its bcast while every "
+        "other rank waits there forever. A user hitting this residual under MPI hangs rather "
+        "than seeing the rejection; nothing in this package can repair a collective that one "
+        "rank has already walked out of."
+    ),
+)
+def test_non_holomorphic_residual_is_refused(mesh, V):
+    """A residual non-holomorphic in the state stays out of scope, and says so by raising.
+
+    The Kerr term `|uh|**2 * uh` is the canonical case. Its Jacobian carries the test function
+    both conjugated and not, which UFL's complex-mode arity rules reject outright -- so the
+    refusal is UFL's, it arrives at Problem construction long before any tape exists, and
+    there is no path by which such a residual could return an unverified number.
+
+    The filter is for the construction failing *partway*: DOLFINx's own
+    `NonlinearProblem.__del__` unconditionally reads attributes its `__init__` had not reached,
+    so collecting the half-built object raises inside a destructor. Upstream, and unrelated to
+    what is being asserted here.
+    """
+    pyadjoint.get_working_tape().clear_tape()
+
+    f = Function(V, name="control")
+    f.x.array[:] = 0.5
+    uh = Function(V, name="state")
+    v = ufl.TestFunction(V)
+    residual = (ufl.inner(ufl.grad(uh), ufl.grad(v)) + ufl.inner(uh * ufl.conj(uh) * uh, v) - ufl.inner(f, v)) * ufl.dx
+
+    with pytest.raises(ArityMismatch):
+        NonlinearProblem(residual, uh, bcs=[], petsc_options=_PETSC_LU)
+
+
+def test_hessian_through_an_interpolation_step_matches_finite_difference(
+    mesh, V, target, assert_hessian_matches_finite_difference
+):
+    """The second-order counterpart of the interpolation gradient test above: a real linear
+    map applied to a genuinely complex field, now carrying a second-order seed.
+    """
+    pyadjoint.get_working_tape().clear_tape()
+    f, h = _random_pair(V, seed=15)
+
+    W = dolfinx.fem.functionspace(mesh, ("Lagrange", 2))
+    target_W = dolfinx.fem.Function(W)
+    target_W.interpolate(target)
+
+    problem, uh = _solve_helmholtz(mesh, V, ufl.as_ufl(1.0), potential=f)
+    interpolated = interpolate(uh, W)
+    Jhat = pyadjoint.ReducedFunctional(
+        assemble_scalar(ufl.inner(interpolated, target_W) * ufl.dx), pyadjoint.Control(f)
+    )
+
+    assert_hessian_matches_finite_difference(Jhat, f, h, fd_eps=1e-4, rtol=1e-5, atol=1e-12)
+    assert abs(Jhat.hessian(h)._ad_dot(h)) > 0.0
+    del problem
+
+
+def test_hessian_through_a_complex_coefficient_interpolation_matches_finite_difference(
+    mesh, V, target, assert_hessian_matches_finite_difference
+):
+    """An interpolated *expression* carrying a complex coefficient, whose operator has
+    genuinely complex entries -- so its second-order seed, like its first-order one, has to
+    travel back through the Hermitian transpose rather than the plain one.
+    """
+    pyadjoint.get_working_tape().clear_tape()
+    f, h = _random_pair(V, seed=16)
+
+    W = dolfinx.fem.functionspace(mesh, ("Lagrange", 2))
+    target_W = dolfinx.fem.Function(W)
+    target_W.interpolate(target)
+    alpha = dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(2.0 + 1.0j))  # type: ignore[arg-type]
+
+    problem, uh = _solve_helmholtz(mesh, V, ufl.as_ufl(1.0), potential=f)
+    Jhat = pyadjoint.ReducedFunctional(
+        assemble_scalar(ufl.inner(interpolate(alpha * uh, W), target_W) * ufl.dx),
+        pyadjoint.Control(f),
+    )
+
+    assert_hessian_matches_finite_difference(Jhat, f, h, fd_eps=1e-4, rtol=1e-5, atol=1e-12)
+    assert abs(Jhat.hessian(h)._ad_dot(h)) > 0.0
+    del problem
+
+
+def test_hessian_through_a_linear_combination_assignment_matches_finite_difference(
+    mesh, V, target, assert_hessian_matches_finite_difference
+):
+    """A control reaching the operator through `assign(3 * f - g, ...)`.
+
+    An assignment mostly hands a seed onward, so the risk here is the places where a value is
+    converted to a Python float or a real dtype on the way through -- which at first order was
+    where the complex path broke.
+    """
+    pyadjoint.get_working_tape().clear_tape()
+    f, h = _random_pair(V, seed=17)
+    g = Function(V, name="offset")
+    g.interpolate(lambda x: 0.25 * np.cos(np.pi * x[0]))
+
+    potential = Function(V, name="potential")
+    assign(3 * f - g, potential)
+
+    problem, uh = _solve_helmholtz(mesh, V, ufl.as_ufl(1.0), potential=potential)
+    Jhat = pyadjoint.ReducedFunctional(assemble_scalar(ufl.inner(uh, target) * ufl.dx), pyadjoint.Control(f))
+
+    assert_hessian_matches_finite_difference(Jhat, f, h, fd_eps=1e-4, rtol=1e-5, atol=1e-12)
+    assert abs(Jhat.hessian(h)._ad_dot(h)) > 0.0
+    del problem
+
+
+def test_hessian_with_a_dirichletbc_control_matches_finite_difference(
+    mesh, V, assert_hessian_matches_finite_difference
+):
+    """A Dirichlet boundary value as the control.
+
+    A bc contributes no `d2F/dm2` or `d2F/dudm` of its own, so its whole Hessian contribution
+    is the boundary reaction taken against the *second-order* adjoint solution -- a different
+    code path from every other control here, and one that at first order had to be masked onto
+    the bc's own dofs.
+    """
+    pyadjoint.get_working_tape().clear_tape()
+
+    boundary_value = Function(V, name="boundary_value")
+    boundary_value.interpolate(lambda x: 0.5 + x[0])
+    mesh.topology.create_connectivity(mesh.topology.dim - 1, mesh.topology.dim)
+    facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
+    dofs = dolfinx.fem.locate_dofs_topological(V, mesh.topology.dim - 1, facets)
+    bc = dirichletbc(boundary_value, dofs)
+
+    uh = Function(V, name="state")
+    u = ufl.TrialFunction(V)
+    v = ufl.TestFunction(V)
+    k = dolfinx.default_scalar_type(4.0 + 0.5j)  # type: ignore[arg-type]
+    a = (ufl.inner(ufl.grad(u), ufl.grad(v)) - k**2 * ufl.inner(u, v)) * ufl.dx
+    L = ufl.inner(dolfinx.fem.Constant(mesh, dolfinx.default_scalar_type(1.0)), v) * ufl.dx
+    problem = LinearProblem(
+        a, L, u=uh, bcs=[bc], petsc_options=_PETSC_LU, adjoint_petsc_options=_PETSC_LU, tlm_petsc_options=_PETSC_LU
+    )
+    problem.solve()
+
+    Jhat = pyadjoint.ReducedFunctional(assemble_scalar(ufl.inner(uh, uh) * ufl.dx), pyadjoint.Control(boundary_value))
+
     h = Function(V)
     h.x.array[:] = 1.0
-    Jhat.derivative()
-    with pytest.raises(NotImplementedError, match="second-order adjoint"):
-        Jhat.hessian(h)
+    h.x.scatter_forward()
+    assert_hessian_matches_finite_difference(Jhat, boundary_value, h, fd_eps=1e-4, rtol=1e-5, atol=1e-12)
+    assert abs(Jhat.hessian(h)._ad_dot(h)) > 0.0
     del problem
 
 

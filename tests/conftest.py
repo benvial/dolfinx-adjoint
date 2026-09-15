@@ -1,10 +1,58 @@
 import gc
+import pathlib
 
 from mpi4py import MPI
 
+import dolfinx.jit
 import numpy as np
 import pyadjoint
 import pytest
+
+
+def _repair_jit_cache() -> None:
+    """Undo the FFCx cache damage left by a form compilation that raised.
+
+    {py:func}`ffcx.codegeneration.jit.compile_forms` claims a form hash by creating an
+    empty ``<hash>.c`` and writes the ``<hash>.c.cached`` marker beside it only once
+    compilation has succeeded. A later compile of the same hash that finds the ``.c``
+    without the marker assumes another process is mid-compile, waits ``timeout``
+    seconds for the marker to appear, and then raises ``TimeoutError``. FFCx guards
+    against exactly this by renaming the placeholder to ``.c.failed`` when compilation
+    raises -- but it does so under ``except Exception``, and UFL raises both of its
+    complex-mode rejections (``ArityMismatch`` and ``ComplexComparisonError``) from
+    ``BaseException``, which that clause does not catch. Under a complex build the
+    placeholder therefore survives, poisoning its hash for the rest of the session:
+    every later test needing the same form fails with a ``TimeoutError`` that has
+    nothing to do with what that test exercises, and since which tests those are
+    depends on execution order, two identical runs disagree about which tests failed.
+
+    Clearing the placeholders around every test keeps a failed compile inside the test
+    that caused it -- the next test needing that form recompiles and sees the real error.
+
+    Only *empty* placeholders are removed. That is exactly the set FFCx's own cleanup
+    misses: UFL rejects a form during code generation, before CFFI has written any
+    source, so a poisoned ``.c`` is always zero bytes, whereas a non-empty one without a
+    marker is a compile still in flight -- possibly in another process sharing the same
+    cache directory -- and must be left alone. A marker with no ``.c`` beside it is
+    removed too: FFCx cannot make progress from that state (it re-claims the hash,
+    recompiles, then dies writing a marker that already exists), and it is the one state
+    this pruning could itself produce if it raced a foreign process.
+
+    Deliberately not synchronised across MPI ranks. A barrier here would be the natural
+    way to guarantee no rank is mid-compile, but ``dolfinx.jit.mpi_jit_decorator``
+    catches only ``Exception`` as well, so the very failure this repairs escapes rank 0
+    before its ``bcast`` and leaves the other ranks blocked inside it -- a barrier would
+    then deadlock the run rather than let the remaining tests report. Every rank prunes
+    independently instead, and the worst a lost race costs is a redundant recompile.
+    """
+    cache_dir = pathlib.Path(dolfinx.jit.get_options()["cache_dir"])
+    for c_file in cache_dir.glob("*.c"):
+        marker = c_file.with_suffix(".c.cached")
+        if not marker.exists() and c_file.stat().st_size == 0:
+            c_file.unlink(missing_ok=True)
+    for marker in cache_dir.glob("*.c.cached"):
+        if not marker.with_suffix("").exists():
+            marker.unlink(missing_ok=True)
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -29,9 +77,9 @@ def pytest_configure(config: pytest.Config) -> None:
     Problems become cyclic garbage more easily than the refcounting invariant suggests, because a
     cycle does not have to be one the object itself takes part in: the traceback of any exception
     raised inside a test holds that test's frame, which holds its local Problem, and a traceback is
-    itself cyclic. A complex-scalar run raises far more of them than a real one -- every
-    second-order-adjoint refusal handled below arrives as an exception -- which is why the stall is
-    specific to the complex build even though nothing about it is.
+    itself cyclic. Nothing about this is specific to the complex build -- it was simply seen there
+    first, back when every Hessian under complex scalars raised a refusal and so produced one of
+    these tracebacks. Ordinary Python keeps producing cycles, so the guard stays whatever raises.
 
     Disabling automatic collection removes the nondeterminism rather than trying to chase the
     cycles: nothing is finalised until ``collect_cycles_between_tests`` collects, at a point every
@@ -61,36 +109,17 @@ def collect_cycles_between_tests():
         gc.collect()
 
 
-_SECOND_ORDER_ADJOINT_UNDERIVED = "second-order adjoint"
+@pytest.fixture(autouse=True)
+def repair_jit_cache():
+    """Stop a form that fails to compile from taking later, unrelated tests down with it.
 
-
-@pytest.hookimpl(wrapper=True)
-def pytest_runtest_call(item):
-    """Report an unsupported complex-scalar Hessian as a skip rather than a failure.
-
-    Under a complex-scalar build the second-order adjoint has not been derived, and the
-    Hessian entry points say so by raising rather than returning a number from a path nobody
-    has checked. That is the intended behaviour, but it leaves a complex run unreadable: a
-    test that asks for a Hessian is indistinguishable, in the summary, from a test of
-    something that is actually broken.
-
-    The tests that reach a Hessian are not confined to one file -- they span the Hessian
-    suite, the TLM update suite, the linear and blocked solver suites, solver reuse,
-    interpolation and assembly -- and most reach one incidentally, through
-    {py:func}`pyadjoint.taylor_test`'s rate-3 Hessian-corrected check rather than by asking
-    for a Hessian in so many words. Recognising the refusal as it propagates keeps that list
-    from having to be maintained by hand, and means a test stops being skipped the moment it
-    no longer needs the unimplemented path. A test that asserts the refusal
-    (``pytest.raises``) never reaches here, since its exception does not propagate.
-
-    Real-scalar builds are unaffected: nothing raises this there.
+    See {py:func}`_repair_jit_cache` for what is repaired and why. Runs before as well as
+    after each test, so a cache left broken by an earlier (possibly interrupted) run does
+    not leak into this one.
     """
-    try:
-        return (yield)
-    except NotImplementedError as refusal:
-        if _SECOND_ORDER_ADJOINT_UNDERIVED not in str(refusal):
-            raise
-        pytest.skip(f"Unsupported under a complex-scalar build: {refusal}")
+    _repair_jit_cache()
+    yield
+    _repair_jit_cache()
 
 
 @pytest.fixture

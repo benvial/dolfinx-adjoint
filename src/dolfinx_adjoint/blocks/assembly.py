@@ -9,7 +9,7 @@ from pyadjoint import Block, OverloadedType, create_overloaded_object
 from ufl.formatting.ufl2unicode import ufl2unicode
 
 from ..ufl_utils import _wirtinger_derivative_forms
-from ..utils import _compile_form, _refuse_second_order_adjoint_under_complex
+from ..utils import _compile_form
 from ._vector import _create_vector, _SpecialVector, _vector  # noqa: F401
 
 
@@ -135,6 +135,14 @@ def _assemble_wirtinger_seed(
     """
     dform, dform_imaginary_direction = _wirtinger_derivative_forms(form, coefficient, argument)
     assert isinstance(dform, ufl.Form), "dform must be a UFL form."
+    if dform.empty():
+        # The form does not depend on this coefficient at all -- a second-order seed of a
+        # Functional that is linear in the state, say, where the first derivative has already
+        # differentiated the state away. The seed is zero, but it still has to be a vector on
+        # the right space, so it is assembled from an explicit zero rather than short-circuited
+        # here: an empty Form is not compilable, while a ZeroBaseForm over the same argument is.
+        dform = ufl.ZeroBaseForm((argument,))
+        dform_imaginary_direction = None
     vector, space = _assemble_rank1_form(
         dform,
         space,
@@ -433,8 +441,6 @@ class AssembleBlock(Block):
         hessian_input = hessian_inputs[0]
         adj_input = adj_inputs[0]
 
-        _refuse_second_order_adjoint_under_complex()
-
         from ufl.algorithms.analysis import extract_arguments
 
         arity_form = len(extract_arguments(form))
@@ -454,8 +460,22 @@ class AssembleBlock(Block):
         #     space = c1._ad_function_space()
         else:
             return None
-        hessian_outputs, dform = self.compute_action_adjoint(hessian_input, arity_form, form, c1_rep, space)
-        ddform = 0.0
+        hessian_outputs = self.compute_action_adjoint(hessian_input, arity_form, form, c1_rep, space)[0]
+
+        # The remaining term seeds `c1` from this block's output *derivative* in the
+        # tangent-linear direction, rather than from the output itself. That derivative is
+        # `tlm_form` below -- the very form `evaluate_tlm_component` assembles -- and the
+        # second-order seed of it is the first-order seed machinery applied to it unchanged.
+        #
+        # Deriving it that way rather than by differentiating the already-derived `dform` a
+        # second time is what makes the complex-scalar case come out: this block's output is
+        # Re(assemble(form)), so its directional derivative is Re(assemble(tlm_form)), and
+        # seeding a real part correctly needs the two Wirtinger derivatives and the one-half
+        # that `compute_action_adjoint` already applies to a form it is handed as `form`. A
+        # form handed in as `dform` gets neither, since by then the seed it stands for has
+        # already been decided. The two constructions agree term by term under a real build,
+        # where differentiation simply commutes.
+        tlm_form = 0.0
         for other_idx, bv in relevant_dependencies:
             c2_rep = bv.saved_output
             tlm_input = bv.tlm_value
@@ -465,14 +485,14 @@ class AssembleBlock(Block):
 
             if isinstance(c2_rep, dolfinx.mesh.Mesh):
                 X = ufl.SpatialCoordinate(c2_rep)
-                ddform += ufl.derivative(dform, X, tlm_input)
+                tlm_form += ufl.derivative(form, X, tlm_input)
             else:
-                ddform += ufl.derivative(dform, c2_rep, tlm_input)
-        if not isinstance(ddform, float):
-            ddform = ufl.algorithms.expand_derivatives(ddform)
+                tlm_form += ufl.derivative(form, c2_rep, tlm_input)
+        if not isinstance(tlm_form, float):
+            tlm_form = ufl.algorithms.expand_derivatives(tlm_form)
 
-        if not ddform.empty():
-            adj_action = self.compute_action_adjoint(adj_input, arity_form, dform=ddform)[0]
+        if not isinstance(tlm_form, float) and not tlm_form.empty():
+            adj_action = self.compute_action_adjoint(adj_input, arity_form, tlm_form, c1_rep, space)[0]
             try:
                 hessian_outputs += adj_action
             except TypeError:

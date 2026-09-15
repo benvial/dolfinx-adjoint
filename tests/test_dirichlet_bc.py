@@ -82,7 +82,12 @@ def _assert_bc_control_gradient_and_hessian(Jhat, m0, h, *, hessian_atol):
             # float (matching how `g`/`g0` were originally constructed, `Constant(mesh,
             # 2.0)`) gives shape () for this scalar test, whereas the raw length-1 array
             # would give shape (1,) and mismatch it under ufl.replace.
-            mp = Constant(m0.function_space.mesh, float(perturbed_array[0]))
+            #
+            # `.real` rather than a bare float(): under a complex build the control is a
+            # real-valued quantity carried in the build's complex dtype, so taking the real
+            # part is what is meant, and saying so keeps numpy from warning about a cast it
+            # cannot tell is deliberate.
+            mp = Constant(m0.function_space.mesh, float(perturbed_array[0].real))
         else:
             mp = Function(m0.function_space)
             mp.x.array[:] = perturbed_array

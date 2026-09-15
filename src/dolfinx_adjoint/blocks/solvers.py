@@ -17,7 +17,7 @@ from ..compat import bcs_by_block
 from ..types import Function
 from ..typing_utils import MaybeBlocked, MaybeBlockedMatrix, NestedSequence
 from ..ufl_utils import assign_mixed_parts, sum_form
-from ..utils import _compile_form, _refuse_second_order_adjoint_under_complex
+from ..utils import _compile_form
 from .assembly import _create_vector, _SpecialVector, _vector, assemble_compiled_form
 
 if typing.TYPE_CHECKING:
@@ -769,7 +769,6 @@ class _ProblemBlockBase(pyadjoint.Block, abc.ABC):
             call. ``None`` if there is nothing to do (no dependency has a
             tangent-linear value).
         """
-        _refuse_second_order_adjoint_under_complex()
         outputs = self.get_outputs()
         tlm_output = [output.tlm_value for output in outputs if output is not None]
         if len(tlm_output) == 0:
@@ -858,7 +857,11 @@ class _ProblemBlockBase(pyadjoint.Block, abc.ABC):
             bs = []
             for i, soa_self_i in enumerate(hessian_templates.soa_self):
                 out_i = outputs[i].saved_output
-                bi = dolfinx.la.vector(out_i.function_space.dofmap.index_map, out_i.function_space.dofmap.index_map_bs)
+                # From the form, not from the index map alone: dolfinx.la.vector defaults to
+                # float64 whatever the build's scalar type, which silently truncates a complex
+                # SOA right-hand side (and under numpy's casting rules does not even truncate
+                # -- the accumulation below raises).
+                bi = _create_vector(soa_self_i, out_i.function_space)
                 bi.array[:] = 0.0
                 dolfinx.fem.assemble_vector(bi.array, soa_self_i)
                 bs.append(bi)
