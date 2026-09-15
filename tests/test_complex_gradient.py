@@ -424,15 +424,19 @@ def _pml_metalens(mesh_size: int, seed: int):
     itself by parity; and the projection maps 0.5 to 0.5 for every sharpness, which would make
     `beta` unobservable. Every material constant is the demo's, so that the two copies of this
     physics drift visibly rather than silently -- nothing executes the demo itself, since it is
-    kept out of `_toc.yml` (the documentation is built in real mode). The one thing that does not
-    carry over is what those constants buy: this mesh is far coarser, so the filter here is a
-    sub-element smoother rather than the minimum length scale it imposes in the demo. That is
-    irrelevant to what is being checked, which is that the adjoint crosses the filter solve.
+    kept out of `_toc.yml` (the documentation is built in real mode). Two things deliberately do
+    not carry over, neither of which the adjoint can tell apart. This mesh is far coarser, so the
+    filter here is a sub-element smoother rather than the minimum length scale it imposes in the
+    demo. And the mesh is a plain `create_rectangle` grid with the regions selected by cell
+    midpoint, rather than the demo's conforming gmsh geometry: region boundaries falling mid-cell
+    cost accuracy, not correctness, and gmsh is a documentation dependency rather than a test
+    one.
 
     This is the demo's whole chain at a mesh coarse enough to run in a test, and it is the
     only place in this file where the control reaches the Functional through the *bilinear*
-    form rather than the right-hand side, through a second recorded solve, and against an
-    operator carrying genuinely complex (PML) coefficients.
+    form rather than the right-hand side, through a second recorded solve, across two meshes
+    joined by an entity map, and against an operator carrying genuinely complex (PML)
+    coefficients.
     """
     wavelength = 1.0
     k0 = 2.0 * np.pi / wavelength
@@ -449,21 +453,33 @@ def _pml_metalens(mesh_size: int, seed: int):
         dolfinx.mesh.CellType.triangle,
     )
     tdim = msh.topology.dim
-    design_cells = dolfinx.mesh.locate_entities(
-        msh, tdim, lambda x: (x[0] > design[0]) & (x[0] < design[1]) & (x[1] > design[2]) & (x[1] < design[3])
-    )
-    focus_cells = dolfinx.mesh.locate_entities(
-        msh, tdim, lambda x: (x[0] - focus_centre[0]) ** 2 + (x[1] - focus_centre[1]) ** 2 < focus_radius**2
-    )
     index_map = msh.topology.index_map(tdim)
-    markers = np.full(index_map.size_local + index_map.num_ghosts, bulk_tag, dtype=np.int32)
+    all_cells = np.arange(index_map.size_local + index_map.num_ghosts, dtype=np.int32)
+    # By midpoint rather than `locate_entities`, which needs the predicate to hold at every
+    # vertex and so drops every cell straddling a region boundary. Mirrors the demo.
+    midpoints = dolfinx.mesh.compute_midpoints(msh, tdim, all_cells)
+    design_cells = all_cells[
+        (midpoints[:, 0] > design[0])
+        & (midpoints[:, 0] < design[1])
+        & (midpoints[:, 1] > design[2])
+        & (midpoints[:, 1] < design[3])
+    ]
+    focus_cells = all_cells[
+        (midpoints[:, 0] - focus_centre[0]) ** 2 + (midpoints[:, 1] - focus_centre[1]) ** 2 < focus_radius**2
+    ]
+    markers = np.full(all_cells.size, bulk_tag, dtype=np.int32)
     markers[design_cells] = design_tag
     markers[focus_cells] = focus_tag
     cell_tags = dolfinx.mesh.meshtags(msh, tdim, np.arange(markers.size, dtype=np.int32), markers)
     dx = ufl.Measure("dx", domain=msh, subdomain_data=cell_tags)
 
+    # The density lives on the design region alone, as a mesh of its own; the Helmholtz solve
+    # reaches its permittivity across the two meshes through an entity map. Mirrors the demo.
+    design_mesh, design_to_parent, _, _ = dolfinx.mesh.create_submesh(msh, tdim, design_cells)
+    dx_design = ufl.Measure("dx", domain=design_mesh)
+
     Vf = dolfinx.fem.functionspace(msh, ("Lagrange", 2))
-    Q = dolfinx.fem.functionspace(msh, ("Lagrange", 1))
+    Q = dolfinx.fem.functionspace(design_mesh, ("Lagrange", 1))
     x = ufl.SpatialCoordinate(msh)
 
     def stretch(coordinate, half_width):
@@ -478,19 +494,21 @@ def _pml_metalens(mesh_size: int, seed: int):
     rho.x.array[:] = np.random.default_rng(seed).uniform(0.0, 1.0, size=rho.x.array.size)
     rho.x.scatter_forward()
 
-    # Helmholtz density filter: a second recorded solve between the control and the operator.
+    # Helmholtz density filter: a second recorded solve between the control and the operator,
+    # posed on the design mesh, where homogeneous Neumann is the natural boundary condition and
+    # no Dirichlet condition is needed at all.
     trial_rho, w = ufl.TrialFunction(Q), ufl.TestFunction(Q)
     rho_filtered = Function(Q, name="filtered_density")
     filter_problem = LinearProblem(
-        (filter_radius**2 * ufl.inner(ufl.grad(trial_rho), ufl.grad(w)) + ufl.inner(trial_rho, w)) * ufl.dx,
-        ufl.inner(rho, w) * ufl.dx,
+        (filter_radius**2 * ufl.inner(ufl.grad(trial_rho), ufl.grad(w)) + ufl.inner(trial_rho, w)) * dx_design,
+        ufl.inner(rho, w) * dx_design,
         u=rho_filtered,
         petsc_options=_PETSC_LU,
         adjoint_petsc_options=_PETSC_LU,
     )
     filter_problem.solve()
 
-    beta, eta = dolfinx.fem.Constant(msh, dolfinx.default_scalar_type(4.0)), 0.5
+    beta, eta = dolfinx.fem.Constant(design_mesh, dolfinx.default_scalar_type(4.0)), 0.5
     projected = (ufl.tanh(beta * eta) + ufl.tanh(beta * (rho_filtered - eta))) / (
         ufl.tanh(beta * eta) + ufl.tanh(beta * (1 - eta))
     )
@@ -510,7 +528,15 @@ def _pml_metalens(mesh_size: int, seed: int):
         dolfinx.fem.locate_dofs_topological(Vf, tdim - 1, outer_facets),
         Vf,
     )
-    problem = LinearProblem(a, L, u=scattered, bcs=[bc], petsc_options=_PETSC_LU, adjoint_petsc_options=_PETSC_LU)
+    problem = LinearProblem(
+        a,
+        L,
+        u=scattered,
+        bcs=[bc],
+        petsc_options=_PETSC_LU,
+        adjoint_petsc_options=_PETSC_LU,
+        entity_maps=[design_to_parent],
+    )
     problem.solve()
 
     total = scattered + incident
@@ -540,9 +566,11 @@ def test_metalens_design_chain_gradient_converges_at_second_order():
         # The direct check the rest of this file makes, first: the Taylor rates below only
         # constrain how the remainder shrinks, and a gradient wrong by a constant factor can
         # still produce a clean rate of 2. `|E|**2` is quadratic in the state, hence in the
-        # control, so the central difference is used rather than the forward one.
+        # control, so the central difference is used rather than the forward one. Its step is
+        # tighter than the default: this base point is random on a coarse mesh, so the third
+        # derivative carried by the O(eps**2) truncation term is large enough to show at 1e-3.
         gradient = Jhat.derivative()
-        assert np.isclose(gradient._ad_dot(h), _central_difference(Jhat, rho, h), rtol=1e-5, atol=1e-10)
+        assert np.isclose(gradient._ad_dot(h), _central_difference(Jhat, rho, h, eps=1e-4), rtol=1e-5, atol=1e-10)
 
         # The gradient stays in the control's complex dtype but is mathematically real, and is
         # not the zero vector, which would satisfy every other assertion here for free.
