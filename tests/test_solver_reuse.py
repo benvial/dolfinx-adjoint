@@ -601,6 +601,10 @@ def test_linear_problem_released_by_refcounting_not_gc():
         "ksp_error_if_not_converged": True,
         "pc_factor_mat_solver_type": "mumps",
     }
+    # Restore whatever the collector was set to rather than enabling it unconditionally:
+    # under ``mpirun`` conftest.py disables it for the whole session, and re-enabling it
+    # here would reintroduce exactly the rank-nondeterministic finalisation described there.
+    collector_was_enabled = gc.isenabled()
     gc.disable()
     try:
         problem = LinearProblem(a, L, bcs=[bc], u=uh, petsc_options=petsc_options)
@@ -616,7 +620,8 @@ def test_linear_problem_released_by_refcounting_not_gc():
             "between MPI ranks"
         )
     finally:
-        gc.enable()
+        if collector_was_enabled:
+            gc.enable()
 
 
 def test_nonlinear_problem_released_by_refcounting_not_gc():
@@ -650,6 +655,10 @@ def test_nonlinear_problem_released_by_refcounting_not_gc():
         "snes_error_if_not_converged": True,
     }
     options.update(direct_options)
+    # Restore whatever the collector was set to rather than enabling it unconditionally:
+    # under ``mpirun`` conftest.py disables it for the whole session, and re-enabling it
+    # here would reintroduce exactly the rank-nondeterministic finalisation described there.
+    collector_was_enabled = gc.isenabled()
     gc.disable()
     try:
         problem = NonlinearProblem(F1, u=u1, bcs=[bc], petsc_options=options, adjoint_petsc_options=direct_options)
@@ -665,7 +674,8 @@ def test_nonlinear_problem_released_by_refcounting_not_gc():
             "between MPI ranks"
         )
     finally:
-        gc.enable()
+        if collector_was_enabled:
+            gc.enable()
 
 
 def test_linear_problem_rebuilt_after_garbage_collection():
