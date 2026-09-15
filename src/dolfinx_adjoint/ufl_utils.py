@@ -284,7 +284,7 @@ def _derivative_along(form: ufl.Form, coefficient: ufl.core.expr.Expr, direction
     return map_integrands(lambda integrand: _conjugate_for_complex_mode(integrand, argument), dform)
 
 
-def wirtinger_derivative_forms(
+def _wirtinger_derivative_forms(
     form: ufl.Form, coefficient: ufl.core.expr.Expr, argument: ufl.Argument
 ) -> tuple[ufl.Form, ufl.Form | None]:
     r"""Forms whose assembly gives the adjoint seed of ``form`` with respect to ``coefficient``.
@@ -314,9 +314,12 @@ def wirtinger_derivative_forms(
 
     .. math::
 
-        \mathrm{Re}(v_1) + i\,\mathrm{Re}(v_2),
+        \mathrm{Re}(v_1) + i\,\mathrm{Re}(v_2).
 
-    which callers must form themselves, having assembled both forms.
+    Forming that combination is not left to callers: this function is private to
+    {py:func}`dolfinx_adjoint.blocks.assembly._assemble_wirtinger_seed`, which assembles both
+    forms and combines them, and is the only thing that should call it. The split into two
+    functions is only the split between symbolic work and assembly.
 
     Each form is also repaired for UFL's complex-mode arity rules, which require argument
     number 0 to appear conjugated in every term. {py:func}`ufl.derivative` leaves the direction

@@ -8,7 +8,7 @@ import ufl
 from pyadjoint import Block, OverloadedType, create_overloaded_object
 from ufl.formatting.ufl2unicode import ufl2unicode
 
-from ..ufl_utils import wirtinger_derivative_forms
+from ..ufl_utils import _wirtinger_derivative_forms
 from ..utils import _compile_form, _refuse_second_order_adjoint_under_complex
 from ._vector import _create_vector, _SpecialVector, _vector  # noqa: F401
 
@@ -65,6 +65,93 @@ def _assemble_scalar_value(
     output = form.mesh.comm.allreduce(local_output, op=MPI.SUM)
     # See this function's docstring: J := Re(assemble(form)), unconditionally.
     return float(numpy.real(output))
+
+
+def _assemble_rank1_form(
+    form: ufl.Form,
+    space: dolfinx.fem.FunctionSpace | None = None,
+    jit_options: dict | None = None,
+    form_compiler_options: dict | None = None,
+    entity_maps: typing.Any = None,
+) -> tuple[_SpecialVector, dolfinx.fem.FunctionSpace]:
+    """Compile a rank-1 form and assemble it into a vector of its own.
+
+    Args:
+        form: The rank-1 form.
+        space: The space its argument lives on. Inferred from the form when not given.
+        jit_options: JIT compilation options.
+        form_compiler_options: Form compiler options.
+        entity_maps: Relations between the meshes of the form's arguments and coefficients.
+
+    Returns:
+        The assembled vector, and the space it lives on -- which a caller assembling a second
+        form into the same space needs, having possibly left it to be inferred here.
+    """
+    compiled_form = _compile_form(
+        form,
+        jit_options=jit_options,
+        form_compiler_options=form_compiler_options,
+        entity_maps=entity_maps,
+    )
+    if space is None:
+        (argument,) = form.arguments()
+        space = argument.ufl_function_space()
+    vector = _create_vector(compiled_form, space)
+    vector.array[:] = 0.0
+    assemble_compiled_form(compiled_form, vector)
+    return vector, space
+
+
+def _assemble_wirtinger_seed(
+    form: ufl.Form,
+    coefficient: typing.Union[ufl.Coefficient, ufl.Constant],
+    argument: ufl.Argument,
+    space: dolfinx.fem.FunctionSpace | None = None,
+    jit_options: dict | None = None,
+    form_compiler_options: dict | None = None,
+    entity_maps: typing.Any = None,
+) -> tuple[_SpecialVector, ufl.Form]:
+    r"""Assemble the adjoint seed of a rank-0 ``form`` with respect to ``coefficient``.
+
+    The one place a seed is derived and assembled, so that the difference between the two
+    scalar types stays here rather than at each call site. Under a real-scalar build the seed
+    is one assembled derivative. Under a complex-scalar build it takes two, combined vector by
+    vector as :math:`\mathrm{Re}(v_1) + i\,\mathrm{Re}(v_2)`; see
+    {py:func}`dolfinx_adjoint.ufl_utils._wirtinger_derivative_forms` for why one derivative is
+    not enough and what the two are.
+
+    Args:
+        form: The rank-0 form to differentiate.
+        coefficient: The coefficient to differentiate with respect to.
+        argument: The direction to differentiate in, an argument over a real-valued basis.
+        space: The space ``argument`` lives on. Inferred from the derivative when not given.
+        jit_options: JIT compilation options.
+        form_compiler_options: Form compiler options.
+        entity_maps: Relations between the meshes of the form's arguments and coefficients.
+
+    Returns:
+        The assembled seed, and the derivative form along ``argument`` -- which the
+        second-order path differentiates a second time.
+    """
+    dform, dform_imaginary_direction = _wirtinger_derivative_forms(form, coefficient, argument)
+    assert isinstance(dform, ufl.Form), "dform must be a UFL form."
+    vector, space = _assemble_rank1_form(
+        dform,
+        space,
+        jit_options=jit_options,
+        form_compiler_options=form_compiler_options,
+        entity_maps=entity_maps,
+    )
+    if dform_imaginary_direction is not None:
+        imaginary_direction_vector, _ = _assemble_rank1_form(
+            dform_imaginary_direction,
+            space,
+            jit_options=jit_options,
+            form_compiler_options=form_compiler_options,
+            entity_maps=entity_maps,
+        )
+        vector.array[:] = vector.array.real + 1j * imaginary_direction_vector.array.real
+    return vector, dform
 
 
 def assemble_compiled_form(
@@ -179,54 +266,34 @@ class AssembleBlock(Block):
         if arity_form == 0:
             assert arity_form == self.compiled_form.rank, "Inconsistent arity of input form and block form."
             computing_own_output_derivative = dform is None
-            dform_imaginary_direction = None
             if dform is None:
                 assert space is not None
                 assert form is not None and c_rep is not None
-                dc = ufl.TestFunction(space)
                 # Not ufl.derivative directly: under a complex build a single derivative does
                 # not carry enough information to seed the adjoint, and the one UFL produces
                 # breaks its own complex-mode arity rules. See
-                # {py:func}`dolfinx_adjoint.ufl_utils.wirtinger_derivative_forms`.
-                dform, dform_imaginary_direction = wirtinger_derivative_forms(form, c_rep, dc)
-
-            assert isinstance(dform, ufl.Form), "dform must be a UFL form."
-            compiled_adjoint = _compile_form(
-                dform,
-                jit_options=self._jit_options,
-                form_compiler_options=self._form_compiler_options,
-                entity_maps=self._entity_maps,
-            )
-
-            if space is None:
-                # If space is not supplied infer it from the form
-                assert len(dform.arguments()) == 1
-                space = dform.arguments()[0].ufl_function_space()
-                # self._cached_vectors[id(space)] = _create_vector(compiled_adjoint)
-            vector = _create_vector(compiled_adjoint, space)
-            vector.array[:] = 0.0
-            # elif self._cached_vectors.get(id(space)) is None:
-            # Create a new vector for this space
-            # self._cached_vectors[id(space)] = _create_vector(compiled_adjoint)
-            # self._cached_vectors[id(space)].array[:] = 0.0
-            # assemble_compiled_form(compiled_adjoint, self._cached_vectors[id(space)])
-            assemble_compiled_form(compiled_adjoint, vector)
-
-            if dform_imaginary_direction is not None:
-                # Re(v1) + i*Re(v2) separates the holomorphic from the anti-holomorphic part
-                # of the derivative and conjugates the former, which is the seed every
-                # (Hermitian) pairing downstream expects; see
-                # {py:func}`dolfinx_adjoint.ufl_utils.wirtinger_derivative_forms`.
-                compiled_imaginary_direction = _compile_form(
-                    dform_imaginary_direction,
+                # {py:func}`_assemble_wirtinger_seed`.
+                vector, dform = _assemble_wirtinger_seed(
+                    form,
+                    c_rep,
+                    ufl.TestFunction(space),
+                    space,
                     jit_options=self._jit_options,
                     form_compiler_options=self._form_compiler_options,
                     entity_maps=self._entity_maps,
                 )
-                imaginary_direction_vector = _create_vector(compiled_imaginary_direction, space)
-                imaginary_direction_vector.array[:] = 0.0
-                assemble_compiled_form(compiled_imaginary_direction, imaginary_direction_vector)
-                vector.array[:] = vector.array.real + 1j * imaginary_direction_vector.array.real
+            else:
+                # An already-derived form (the second-order path's second directional
+                # derivative): the seed it stands for was decided by whoever derived it, so
+                # there is nothing to split here and it is assembled as it comes.
+                assert isinstance(dform, ufl.Form), "dform must be a UFL form."
+                vector, space = _assemble_rank1_form(
+                    dform,
+                    space,
+                    jit_options=self._jit_options,
+                    form_compiler_options=self._form_compiler_options,
+                    entity_maps=self._entity_maps,
+                )
 
             if computing_own_output_derivative and numpy.iscomplexobj(vector.array):
                 # This block's own forward output is Re(assemble(form)) (`assemble_scalar`
