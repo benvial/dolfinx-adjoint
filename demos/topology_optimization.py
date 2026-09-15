@@ -41,7 +41,7 @@
 # and a soft volume-fraction penalty added to the objective,
 #
 # $$
-# \min_{x_\min \le \rho \le 1} \; J(\rho) &= C(\rho) + w\left(\bar\rho - v_\mathrm{frac}\right)^2,
+# \min_{x_\min \le \rho \le 1} \; J(\rho) = C(\rho) + w\left(\bar\rho - v_\mathrm{frac}\right)^2,
 # \qquad \bar\rho = \frac{1}{|\Omega|}\int_\Omega \rho~\mathrm{d}x.
 # $$
 #
@@ -55,6 +55,7 @@
 # We start by importing the necessary modules.
 
 # +
+import itertools
 import time
 
 from mpi4py import MPI
@@ -77,6 +78,8 @@ import dolfinx_adjoint
 
 # + tags=["hide-input"]
 pyvista.set_jupyter_backend("html")
+
+PLOT_WINDOW_SIZE = [640, 480]
 # -
 
 # ## Material and problem parameters
@@ -162,15 +165,19 @@ def make_iteration_tracker(
     """Return (plotter, callback, compliance_history) tracking one optimizer run."""
     # One frame per outer iteration is embedded in the rendered page, so the frames are
     # kept well below the default 1024x768 to keep the page a reasonable size.
-    plotter = pyvista.Plotter(off_screen=True, window_size=[640, 480])
-    plotter.open_gif(gif_path, fps=10)
+    plotter = pyvista.Plotter(off_screen=True, window_size=PLOT_WINDOW_SIZE)
+    plotter.open_gif(gif_path, fps=5)
     compliance_history = [initial_compliance]
+    frame_index = itertools.count()
 
     def write_frame():
         grid = pyvista.UnstructuredGrid(*dolfinx.plot.vtk_mesh(msh))
         grid.cell_data["rho"] = rho.x.array
         filtered_grid = grid.threshold(0.5, scalars="rho")
         actor = plotter.add_mesh(filtered_grid, scalars="rho", clim=(0.0, 1.0), cmap="viridis", show_edges=False)
+        # Passing `name` replaces the previous label rather than stacking one text actor
+        # per frame, so only the mesh actor has to be removed again below.
+        plotter.add_text(f"iteration {next(frame_index)}", font_size=10, name="iteration")
         plotter.view_isometric()
         plotter.write_frame()
         plotter.remove_actor(actor)
@@ -360,7 +367,7 @@ def optimize(
     grid = pyvista.UnstructuredGrid(*dolfinx.plot.vtk_mesh(msh))
     grid.cell_data["rho"] = rho.x.array
     filtered_grid = grid.threshold(0.5, scalars="rho")
-    final_plotter = pyvista.Plotter(off_screen=pyvista.OFF_SCREEN)
+    final_plotter = pyvista.Plotter(off_screen=pyvista.OFF_SCREEN, window_size=PLOT_WINDOW_SIZE)
     final_plotter.add_text(case_name, font_size=10)
     final_plotter.add_mesh(filtered_grid, scalars="rho", clim=(0.0, 1.0), cmap="viridis", show_edges=False)
     final_plotter.view_isometric()
@@ -398,8 +405,7 @@ for corner_load in [True, False]:
 
 # ## Optimised designs
 #
-# The per-iteration density animation and the converged design for each load case. Both
-# were rendered by the cell above, and are displayed here rather than inside its scroll box.
+# The per-iteration density animation and the converged design for each load case.
 
 for result in results:
     display(Markdown(f"**{result['case']}**"))
