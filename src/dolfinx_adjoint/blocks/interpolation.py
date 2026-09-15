@@ -67,12 +67,11 @@ def _prepare_interpolation_data(expr: ufl.core.expr.Expr, space_to: dolfinx.fem.
     if not _elementwise_dual_evaluation_is_a_reshape(space_to):
         return _import_scifem().prepare_interpolation_data(expr, space_to)
 
+    # Both spaces are known to share a mesh: MatrixFreeInterpolationOperator, this function's
+    # only caller, refuses anything else before getting here.
     (argument,) = ufl.algorithms.extract_arguments(expr)
     space_from = argument.ufl_function_space()
     mesh = space_from.mesh
-    if space_to.mesh.topology.dim != mesh.topology.dim:
-        # A codim-1 target needs the integration entities scifem takes as an argument.
-        return _import_scifem().prepare_interpolation_data(expr, space_to)
 
     points = get_interpolation_points(space_to)
     cells = np.arange(mesh.topology.index_map(mesh.topology.dim).size_local, dtype=np.int32)
@@ -588,6 +587,24 @@ class MatrixFreeInterpolationOperator:
         if len(args) != 1:
             raise ValueError("MatrixFreeInterpolationOperator only supports expressions with a single argument.")
         space_from = args[0].ufl_function_space()
+        if space_to.mesh is not space_from.mesh:
+            # Every index below is a cell index, and the two spaces' dofmaps are read with the
+            # same one: the operator is built cell by cell from values evaluated on the
+            # expression's mesh, then reshaped by the target mesh's cell count. That is only
+            # meaningful when both spaces sit on the same mesh. A target on a submesh (of either
+            # codimension) needs a cell map that neither this path nor scifem's
+            # ``prepare_interpolation_data`` takes, and without this check the mismatch surfaces
+            # either as a bare reshape ValueError naming neither space or -- when the two meshes
+            # happen to have the same number of cells -- as an operator that is silently wrong.
+            raise NotImplementedError(
+                "Interpolating a UFL expression onto a function space on a different mesh is not "
+                "supported. The expression's argument is defined on a mesh with "
+                f"{space_from.mesh.topology.index_map(space_from.mesh.topology.dim).size_global} "
+                "cells and the target space on one with "
+                f"{space_to.mesh.topology.index_map(space_to.mesh.topology.dim).size_global} "
+                "cells; cell-local interpolation data indexes both by the same cells. Interpolate "
+                "within one mesh, or transfer between meshes outside the tape."
+            )
 
         # Unroll DOF maps using your optimized function
         Q_dofmap = unroll_dofmap(space_to.dofmap.list, space_to.dofmap.bs)
