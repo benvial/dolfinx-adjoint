@@ -1,63 +1,55 @@
-# # Topology optimization of a dielectric metalens (complex Helmholtz)
+# ---
+# jupyter:
+#   kernelspec:
+#     display_name: Python 3 (DOLFINx complex)
+#     language: python
+#     name: python3-complex
+# ---
+
+# # Topology optimization of a dielectric metalens
 #
-# This demo is the validation case for complex-valued PDE support in
-# {py:mod}`dolfinx_adjoint` (see [issue #27][issue27]). It differentiates a **real-valued**
-# objective through a **complex-valued**, sesquilinear PDE solve with respect to a
-# **real-valued** control, and then runs a full topology optimization on top of that gradient.
+# We design a flat dielectric lens that focuses a plane wave onto a small spot. The wave problem
+# is a complex-valued Helmholtz equation, while the design density and the objective are real;
+# {py:mod}`dolfinx_adjoint` differentiates through the complex solve for us.
 #
 # ```{admonition} This demo requires a complex PETSc build
 # :class: warning
-# Run it inside a DOLFINx container after sourcing `/usr/local/bin/dolfinx-complex-mode`.
-# Under a real build the wave problem below has no imaginary part to speak of and the demo
-# stops immediately. It is deliberately *not* listed in `_toc.yml` for that reason: the
-# documentation is built in real mode.
+# See the [installation instructions](https://jsdokken.com/dolfinx-tutorial/chapter1/complex_mode.html#installation-of-fenicsx-with-complex-number-support).
+# The documentation runs it with the `python3-complex` Jupyter kernel of the DOLFINx images.
 # ```
-#
-# [issue27]: https://github.com/scientificcomputing/dolfinx-adjoint/issues/27
 #
 # ## Problem definition
 #
-# We design a flat dielectric lens that focuses a normally incident plane wave onto a small
-# spot behind it. In two dimensions with TM polarization the only field component is the
-# out-of-plane electric field $E_z$, and the time-harmonic Maxwell equations collapse to the
-# scalar Helmholtz equation
+# In two dimensions with TM polarization, the out-of-plane electric field $E$ satisfies
 #
 # $$
 # \nabla^2 E + k_0^2\,\varepsilon_r(\mathbf{x})\,E = 0,
 # \qquad k_0 = \frac{2\pi}{\lambda},
 # $$
 #
-# with an $e^{-i\omega t}$ time convention, so that outgoing waves behave like $e^{+ik_0 r}$.
+# with an $e^{-i\omega t}$ time convention.
 #
 # ### Scattered-field formulation
 #
-# Rather than solving for the total field we split it as $E = E_\mathrm{inc} + E_s$, where
-# $E_\mathrm{inc} = e^{ik_0 x}$ is the incident plane wave, which already solves the equation
-# for the background $\varepsilon_r = 1$. Subtracting the background equation leaves a problem
-# for the scattered field alone,
+# We write $E = E_\mathrm{inc} + E_s$, with the incident plane wave $E_\mathrm{inc} = e^{ik_0 x}$.
+# The scattered field then solves
 #
 # $$
 # \nabla^2 E_s + k_0^2 \varepsilon_r E_s
 # = -k_0^2\,(\varepsilon_r - 1)\,E_\mathrm{inc},
 # $$
 #
-# whose source is supported only where the material differs from vacuum, i.e. inside the
-# design region. This is what makes a plane-wave excitation cheap: no incident field has to be
-# launched through a boundary, and $E_s$ is purely outgoing everywhere, so the same absorbing
-# treatment works on all four sides.
+# whose source is nonzero only inside the design region, where $\varepsilon_r \neq 1$.
 #
 # ### Perfectly matched layers
 #
-# The computational box is surrounded by a perfectly matched layer (PML), implemented as a
-# complex coordinate stretch $\partial_x \mapsto s_x^{-1}\partial_x$ with
+# The box is surrounded by a perfectly matched layer (PML), a complex coordinate stretch
 #
 # $$
 # s_x(x) = 1 + i\,\sigma\left(\frac{\max(|x| - x_\mathrm{phys},\,0)}{d_\mathrm{PML}}\right)^2,
 # $$
 #
-# and likewise for $s_y$. Under the $e^{-i\omega t}$ convention a positive imaginary part makes
-# $e^{ik_0\tilde{x}}$ decay, so an outgoing wave is absorbed instead of reflected. Folding the
-# stretch into the weak form gives the sesquilinear problem: find $E_s \in V$ such that
+# and likewise $s_y$, which absorbs outgoing waves. The weak form reads: find $E_s \in V$ such that
 #
 # $$
 # \int_\Omega (\mathbf{A}\nabla E_s)\cdot\overline{\nabla v}~\mathrm{d}x
@@ -66,28 +58,24 @@
 # = k_0^2 \int_{\Omega_d} (\varepsilon_r - 1) E_\mathrm{inc} \overline{v}~\mathrm{d}x
 # $$
 #
-# for all $v \in V$, with
+# for all $v \in V$, with $\mathbf{A} = \operatorname{diag}(s_y/s_x,\ s_x/s_y)$, $c = s_x s_y$ and
+# $E_s = 0$ on the outer boundary.
 #
-# $$
-# \mathbf{A} = \operatorname{diag}\left(\frac{s_y}{s_x}, \frac{s_x}{s_y}\right),
-# \qquad c = s_x s_y,
-# $$
+# ### Mirror symmetry
 #
-# and $E_s = 0$ on the outer boundary, which the PML has already made unreachable. Note that
-# $\mathbf{A}$ and $c$ are genuinely complex: this is not a real operator that merely happens
-# to be stored in a complex dtype.
+# The incident wave and the PML are symmetric about $y = 0$, and we want a symmetric lens. The field
+# is then symmetric too, so we only solve on the upper half $y \ge 0$, with the symmetry condition
+# $\partial E_s / \partial y = 0$ on $y = 0$. This is the natural boundary condition of the weak form,
+# so it needs no extra term: we simply leave $y = 0$ out of the Dirichlet condition. The design is
+# symmetric by construction, and the problem is half the size.
 #
 # ### Design parametrization
 #
-# The design region $\Omega_d$ carries a density $\rho \in [0,1]$, turned into a permittivity
-# by the three standard topology-optimization steps:
+# The design region $\Omega_d$ carries a density $\rho \in [0,1]$, mapped to a permittivity in
+# three standard steps:
 #
-# 1. **Filtering.** A Helmholtz filter of radius $r$ imposes a minimum length scale,
-#    $-r^2\nabla^2\tilde\rho + \tilde\rho = \rho$, posed on the design region $\Omega_d$ alone with
-#    $\partial\tilde\rho/\partial n = 0$ on $\partial\Omega_d$. This is a *second* PDE solve, recorded on
-#    the same tape, so the adjoint has to propagate back through it into the control. The radius
-#    only buys a length scale if it is comfortably larger than the mesh width: at $r \approx h$
-#    the filter is a one-element smoother and the design ends up resolution-limited instead.
+# 1. **Filtering.** A Helmholtz filter $-r^2\nabla^2\tilde\rho + \tilde\rho = \rho$ on
+#    $\Omega_d$, with natural boundary conditions, imposes a minimum length scale $r$.
 # 2. **Projection.** A smoothed Heaviside pushes $\tilde\rho$ towards 0 or 1,
 #
 #    $$
@@ -95,43 +83,30 @@
 #                    {\tanh(\beta\eta) + \tanh(\beta(1 - \eta))},
 #    $$
 #
-#    with the sharpness $\beta$ raised in stages (continuation) and $\eta = 0.5$.
-# 3. **SIMP.** The permittivity interpolates between vacuum and the lens material,
-#    $\varepsilon_r(\bar\rho) = 1 + \bar\rho^{\,p}(\varepsilon_\mathrm{mat} - 1)$, with the
-#    penalization exponent $p$ biasing the permittivity of an intermediate density downwards.
-#    Unlike the compliance problem this exponent was invented for, SIMP on a permittivity does
-#    not on its own make grey unprofitable in a wave problem; here it is the $\beta$
-#    continuation that drives the design binary, and $M_\mathrm{nd}$ below measures whether
-#    it did.
+#    with $\eta = 0.5$ and the sharpness $\beta$ increased in stages.
+# 3. **Interpolation.** $\varepsilon_r(\bar\rho) = 1 + \bar\rho^{\,p}(\varepsilon_\mathrm{mat} - 1)$.
 #
 # ### Objective
 #
-# We maximize the mean intensity over a small circular focal spot $\Omega_f$ behind the lens,
-# normalized by the incident intensity (which is 1), i.e. we minimize
+# We maximize the mean intensity over a small square focal spot $\Omega_f$ behind the lens, i.e. minimize
 #
 # $$
 # J(\rho) = -\frac{1}{|\Omega_f|}\int_{\Omega_f} |E_\mathrm{inc} + E_s|^2~\mathrm{d}x.
 # $$
 #
-# $|E|^2$ is neither holomorphic nor anti-holomorphic in the state, so the adjoint seed for
-# this Functional carries both Wirtinger derivatives; $\rho$, by contrast, is a Real control,
-# whose gradient is the doubled real part $2\,\mathrm{Re}[\lambda^H \partial R/\partial\rho]$.
-#
 # ## Implementation
 
 # +
-import os
-import time
-
 from mpi4py import MPI
 
 import dolfinx
+import dolfinx.fem.petsc
 import gmsh
 import matplotlib.pyplot as plt
 import matplotlib.tri
+import mmapy
 import numpy as np
 import pyadjoint
-import scipy.optimize
 import ufl
 
 import dolfinx_adjoint
@@ -143,16 +118,14 @@ except ImportError:
 
 # -
 
-# The whole point of the demo is the complex scalar type, so we refuse to pretend otherwise.
-
 if not np.issubdtype(dolfinx.default_scalar_type, np.complexfloating):
     raise RuntimeError(
-        "This demo needs a complex-scalar DOLFINx build; source /usr/local/bin/dolfinx-complex-mode before running it."
+        "This demo needs a complex-scalar DOLFINx build."
     )
 
 # ## Parameters
 #
-# Lengths are in units of the free-space wavelength $\lambda$, so $k_0 = 2\pi$.
+# Lengths are in units of the free-space wavelength $\lambda$.
 
 # +
 WAVELENGTH = 1.0
@@ -163,21 +136,22 @@ PML_STRENGTH = 4.0  # peak of the quadratic conductivity profile
 X_PHYS, Y_PHYS = 3.0, 3.2  # half-extent of the physical (non-PML) region
 LX, LY = X_PHYS + PML_WIDTH, Y_PHYS + PML_WIDTH  # half-extent of the whole box
 
-DESIGN_BOX = (-0.5, 0.5, -3, 3)  # (xmin, xmax, ymin, ymax) of the lens slab
-FOCUS_CENTRE, FOCUS_RADIUS = (2, 0.0), 0.2  # the spot whose intensity we maximize
+# Regions as (xmin, xmax, ymin, ymax), upper half only: the lower half is their mirror image.
+DESIGN_BOX = (-0.5, 0.5, 0.0, 3.0)  # the lens slab
+FOCUS_BOX = (1.8, 2.2, 0.0, 0.2)  # the square spot whose intensity we maximize
 
-EPS_MATERIAL = 4.0  # relative permittivity of the solid phase (refractive index 2)
-PENALIZATION = 1.0  # SIMP exponent; 1 is plain linear interpolation, leaving beta to binarize
-FILTER_RADIUS = 0.2  # Helmholtz-filter length scale; keep it a few cell widths, see below
+EPS_MATERIAL = 4.0  # relative permittivity of the lens material
+PENALIZATION = 1.0  # interpolation exponent p
+FILTER_RADIUS = 0.2  # filter length scale; a few cell widths at least
 ETA = 0.5  # projection threshold
 BETA_STAGES = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0)  # projection-sharpness continuation
-ITERATIONS_PER_STAGE = 20
+ITERATIONS_PER_STAGE = 40
 
-CELLS_PER_WAVELENGTH = 10  # cell width h = WAVELENGTH / CELLS_PER_WAVELENGTH
+CELLS_PER_WAVELENGTH = 16  # cell width h = WAVELENGTH / CELLS_PER_WAVELENGTH
 
-RHO_INIT = 0.5  # uniform grey: no bias towards any particular design
+RHO_INIT = 0.5  # uniform grey starting design
 LIVE_PREVIEW = False  # redraw the design and field after every optimizer iteration
-OPTIMIZER = os.environ.get("METALENS_OPTIMIZER", "L-BFGS-B")  # see "Choosing the optimizer" below
+MMA_MOVE = 0.1  # largest change of any density in one MMA iteration
 
 DESIGN_TAG, FOCUS_TAG, BULK_TAG = 1, 2, 3
 
@@ -190,6 +164,9 @@ PETSC_LU = {
 # -
 
 # ## Mesh and subdomains
+#
+# The mesh covers the upper half of the box. The design slab and focal spot are rectangles on a
+# structured quadrilateral grid, so their boundaries conform to the mesh.
 
 # +
 gmsh.initialize()
@@ -201,36 +178,35 @@ cell_size = WAVELENGTH / CELLS_PER_WAVELENGTH
 
 if mesh_comm.rank == model_rank:
     occ = gmsh.model.occ
-    whole_box = occ.addRectangle(-LX, -LY, 0.0, 2 * LX, 2 * LY)
-    physical_box = occ.addRectangle(-X_PHYS, -Y_PHYS, 0.0, 2 * X_PHYS, 2 * Y_PHYS)
-    design_slab = occ.addRectangle(
-        DESIGN_BOX[0], DESIGN_BOX[2], 0.0, DESIGN_BOX[1] - DESIGN_BOX[0], DESIGN_BOX[3] - DESIGN_BOX[2]
-    )
-    focal_disc = occ.addDisk(FOCUS_CENTRE[0], FOCUS_CENTRE[1], 0.0, FOCUS_RADIUS, FOCUS_RADIUS)
 
-    # `fragment` splits every overlap so the pieces share conforming boundaries. Its second
-    # return value maps each *input* entity to the fragments it became, which is how the design
-    # and focal surfaces are identified -- far more robust than guessing from a centre of mass,
-    # since the leftover background surface's centroid can easily land inside the design slab.
-    _, fragments = occ.fragment([(gdim, whole_box)], [(gdim, physical_box), (gdim, design_slab), (gdim, focal_disc)])
+    # Every region boundary lies on one of these lines, which cut the box into a grid of rectangles.
+    x_lines = sorted({-LX, -X_PHYS, *DESIGN_BOX[:2], *FOCUS_BOX[:2], X_PHYS, LX})
+    y_lines = sorted({*DESIGN_BOX[2:], *FOCUS_BOX[2:], Y_PHYS, LY})
+    for x0, x1 in zip(x_lines[:-1], x_lines[1:]):
+        for y0, y1 in zip(y_lines[:-1], y_lines[1:]):
+            occ.addRectangle(x0, y0, 0.0, x1 - x0, y1 - y0)
+    occ.removeAllDuplicates()
     occ.synchronize()
 
-    design_surfaces = [tag for _, tag in fragments[2]]
-    focus_surfaces = [tag for _, tag in fragments[3]]
-    claimed = set(design_surfaces) | set(focus_surfaces)
-    bulk_surfaces = [tag for _, tag in gmsh.model.getEntities(gdim) if tag not in claimed]
+    def inside(box, point):
+        return box[0] < point[0] < box[1] and box[2] < point[1] < box[3]
 
-    gmsh.model.addPhysicalGroup(gdim, design_surfaces, DESIGN_TAG, name="Design")
-    gmsh.model.addPhysicalGroup(gdim, focus_surfaces, FOCUS_TAG, name="Focus")
-    gmsh.model.addPhysicalGroup(gdim, bulk_surfaces, BULK_TAG, name="Background")
+    regions: dict[int, list[int]] = {DESIGN_TAG: [], FOCUS_TAG: [], BULK_TAG: []}
+    for _, surface in gmsh.model.getEntities(gdim):
+        centre = occ.getCenterOfMass(gdim, surface)
+        tag = DESIGN_TAG if inside(DESIGN_BOX, centre) else FOCUS_TAG if inside(FOCUS_BOX, centre) else BULK_TAG
+        regions[tag].append(surface)
+    gmsh.model.addPhysicalGroup(gdim, regions[DESIGN_TAG], DESIGN_TAG, name="Design")
+    gmsh.model.addPhysicalGroup(gdim, regions[FOCUS_TAG], FOCUS_TAG, name="Focus")
+    gmsh.model.addPhysicalGroup(gdim, regions[BULK_TAG], BULK_TAG, name="Background")
 
-    # A uniform size everywhere: a graded mesh would give the density a resolution that varies
-    # across the design region, which is not what a topology optimization wants.
-    gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
-    gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
-    gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
-    gmsh.option.setNumber("Mesh.MeshSizeMin", cell_size)
-    gmsh.option.setNumber("Mesh.MeshSizeMax", cell_size)
+    # A structured quadrilateral grid, with a cell width close to `cell_size` along every edge.
+    for _, curve in gmsh.model.getEntities(1):
+        num_cells = max(1, round(occ.getMass(1, curve) / cell_size))
+        gmsh.model.mesh.setTransfiniteCurve(curve, num_cells + 1)
+    for _, surface in gmsh.model.getEntities(gdim):
+        gmsh.model.mesh.setTransfiniteSurface(surface)
+        gmsh.model.mesh.setRecombine(gdim, surface)
     gmsh.model.mesh.generate(gdim)
 
 mesh_data = gmshio.model_to_mesh(gmsh.model, mesh_comm, model_rank, gdim=gdim)
@@ -245,11 +221,7 @@ design_cells = cell_tags.find(DESIGN_TAG)
 focus_cells = cell_tags.find(FOCUS_TAG)
 dx = ufl.Measure("dx", domain=mesh, subdomain_data=cell_tags)
 
-# The design region also becomes a mesh in its own right. The density lives there and nowhere
-# else, which is what lets the filter below be a genuine design-region problem; the Helmholtz
-# solve reaches its permittivity across the two meshes through an
-# {py:class}`entity map<dolfinx.mesh.EntityMap>`, the same mechanism the
-# [EMI interface-control demo](./emi_membrane_current_control) uses.
+# The density lives on a submesh of the design region.
 design_mesh, design_to_parent, _, _ = dolfinx.mesh.create_submesh(mesh, tdim, design_cells)
 dx_design = ufl.Measure("dx", domain=design_mesh)
 
@@ -257,9 +229,6 @@ print(f"{mesh.topology.index_map(tdim).size_global} cells, {len(design_cells)} i
 # -
 
 # ## PML and incident field
-#
-# The stretch factors are 1 in the physical region and grow quadratically into the layer, so
-# `ufl.max_value` does the clamping symbolically rather than through a marked subdomain.
 
 # +
 x = ufl.SpatialCoordinate(mesh)
@@ -280,29 +249,17 @@ incident = ufl.exp(1j * K0 * x[0])
 
 # ## Control, filter and projection
 #
-# `beta` is a plain {py:class}`dolfinx.fem.Constant` rather than a control: the recorded blocks
-# read its value at replay time, so the continuation loop below can raise it without
-# re-recording the tape.
+# The density `rho` is the control. `beta` is a plain constant, so the continuation loop can change
+# it between stages.
 
 # +
-V = dolfinx.fem.functionspace(mesh, ("Lagrange", 2))  # scattered field, on the whole box
+V = dolfinx.fem.functionspace(mesh, ("Lagrange", 2))  # scattered field, on the upper half of the box
 Q = dolfinx.fem.functionspace(design_mesh, ("Lagrange", 1))  # density, on the design region only
 
 rho = dolfinx_adjoint.Function(Q, name="density")
 rho.x.array[:] = RHO_INIT
 rho.x.scatter_forward()
 
-# The filter is a design-region problem, and posing it on the design mesh is what makes it one.
-# Its weak form carries no boundary term and no Dirichlet condition is applied, so homogeneous
-# Neumann on the slab boundary is the natural condition -- the standard Helmholtz-filter
-# formulation, which conserves mass and lets material reach full density right up to the edge of
-# the design region.
-#
-# Filtering over the whole box instead, with the density pinned to zero outside the slab, is not
-# the same problem: that surrounding band of enforced zero density pulls the filtered density
-# down within about one filter radius of the slab edge, so the lens could never reach full
-# density near its own boundary. That is an artificial erosion of the design boundary, and it
-# also spends degrees of freedom filtering a region whose density is fixed.
 trial_rho, w = ufl.TrialFunction(Q), ufl.TestFunction(Q)
 rho_filtered = dolfinx_adjoint.Function(Q, name="filtered_density")
 filter_problem = dolfinx_adjoint.LinearProblem(
@@ -323,29 +280,34 @@ permittivity = 1.0 + projected**PENALIZATION * (EPS_MATERIAL - 1.0)
 # -
 
 # ## Forward solve
-#
-# The design-region terms are integrated over `dx(DESIGN_TAG)` alone, so the density can only
-# ever place material inside the slab, whatever it does elsewhere.
 
 # +
 scattered = dolfinx_adjoint.Function(V, name="scattered_field")
 u, v = ufl.TrialFunction(V), ufl.TestFunction(V)
 
-a = (ufl.inner(pml_tensor * ufl.grad(u), ufl.grad(v)) - K0**2 * pml_scale * ufl.inner(u, v)) * dx - K0**2 * ufl.inner(
-    (permittivity - 1.0) * u, v
-) * dx(DESIGN_TAG)
-L = K0**2 * ufl.inner((permittivity - 1.0) * incident, v) * dx(DESIGN_TAG)
+
+def helmholtz_forms(eps_r):
+    """Scattered-field weak form for a relative permittivity `eps_r` on the design region."""
+    a = (ufl.inner(pml_tensor * ufl.grad(u), ufl.grad(v)) - K0**2 * pml_scale * ufl.inner(u, v)) * dx
+    a -= K0**2 * ufl.inner((eps_r - 1.0) * u, v) * dx(DESIGN_TAG)
+    L = K0**2 * ufl.inner((eps_r - 1.0) * incident, v) * dx(DESIGN_TAG)
+    return a, L
+
+
+a, L = helmholtz_forms(permittivity)
 
 mesh.topology.create_connectivity(tdim - 1, tdim)
-outer_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
+boundary_facets = dolfinx.mesh.exterior_facet_indices(mesh.topology)
+# The symmetry line y = 0 keeps its natural boundary condition.
+on_symmetry_line = np.isclose(dolfinx.mesh.compute_midpoints(mesh, tdim - 1, boundary_facets)[:, 1], 0.0)
+outer_facets = boundary_facets[~on_symmetry_line]
 bc = dolfinx.fem.dirichletbc(
     dolfinx.default_scalar_type(0.0),
     dolfinx.fem.locate_dofs_topological(V, tdim - 1, outer_facets),
     V,
 )
 
-# `entity_maps` is what lets one form carry both meshes: the PML terms are integrated over the
-# whole box, while the permittivity in the design-region terms lives on the design mesh.
+# `entity_maps` lets the form use the permittivity, which lives on the design submesh.
 problem = dolfinx_adjoint.LinearProblem(
     a,
     L,
@@ -359,10 +321,7 @@ problem = dolfinx_adjoint.LinearProblem(
 problem.solve()
 # -
 
-# ## Objective
-#
-# {py:func}`dolfinx_adjoint.assemble_scalar` takes the real part of a rank-0 form, so `J` is a
-# real `AdjFloat` even though every field in it is complex.
+# ## Objective and reduced functional
 
 # +
 focus_area = dolfinx_adjoint.assemble_scalar(1.0 * dx(FOCUS_TAG), annotate=False)
@@ -374,13 +333,10 @@ Jhat = pyadjoint.ReducedFunctional(J, pyadjoint.Control(rho))
 print(f"intensity enhancement of the grey starting design: {-float(J):.4f}")
 # -
 
-# ## Gradient and Hessian verification
+# ## Verifying the derivatives
 #
-# The Taylor remainder $|J(\rho + \epsilon h) - J(\rho)|$ is $\mathcal{O}(\epsilon)$, and
-# subtracting the adjoint gradient's contribution leaves $\mathcal{O}(\epsilon^2)$. Subtracting
-# the Hessian's contribution as well leaves $\mathcal{O}(\epsilon^3)$. Rates of 1, 2 and 3 are
-# what make this demo a validation case rather than a picture -- and the third is what says the
-# Hessian-vector products the optimizer below runs on are the real thing.
+# Taylor tests check the gradient and the Hessian: the remainders should converge at rates 1
+# (no correction), 2 (gradient) and 3 (gradient and Hessian).
 
 # +
 with pyadjoint.stop_annotating():
@@ -391,10 +347,7 @@ with pyadjoint.stop_annotating():
     rate_0 = pyadjoint.taylor_test(Jhat, rho, direction, dJdm=0)
     rate_1 = pyadjoint.taylor_test(Jhat, rho, direction)
 
-    # Back to `rho` before the Hessian: `taylor_test` leaves the functional evaluated at its
-    # last perturbed point, and a Hessian-vector product taken there is a correct product at
-    # the wrong base point -- which the rate-3 check then reads as a broken Hessian. The
-    # adjoint sweep is needed too, since the second-order pass runs on top of it.
+    # Return to the base point before taking the Hessian.
     Jhat(rho)
     Jhat.derivative()
     Hm = Jhat.hessian(direction)._ad_dot(direction)
@@ -407,27 +360,33 @@ with pyadjoint.stop_annotating():
     print(f"max |Im(dJ/drho)| (expect 0): {np.abs(gradient.x.array.imag).max():.3e}")
 # -
 
+
 # ## Plotting
-#
-# Defined before the optimization loop so the live preview and the final figure are the same
-# code, and cannot drift apart.
 
 # +
-# Two triangulations, because the field and the density live on different meshes: the scattered
-# field on the whole box, the density on the design region alone.
 field_space = dolfinx.fem.functionspace(mesh, ("Lagrange", 1))
 
 
 def _triangulation(space):
+    """Triangulate the mesh of `space` and its mirror image, for plotting the whole box.
+
+    Each quadrilateral cell becomes two triangles. The mirrored nodes and triangles follow the
+    originals, so values are mirrored with `np.tile(values, 2)`.
+    """
     cells, _, nodes = dolfinx.plot.vtk_mesh(space)
-    return matplotlib.tri.Triangulation(nodes[:, 0], nodes[:, 1], cells.reshape(-1, 4)[:, 1:])
+    quads = cells.reshape(-1, 5)[:, 1:]
+    triangles = np.stack([quads[:, [0, 1, 2]], quads[:, [0, 2, 3]]], axis=1).reshape(-1, 3)
+    mirrored_nodes = nodes[:, :2] * [1.0, -1.0]
+    all_nodes = np.concatenate([nodes[:, :2], mirrored_nodes])
+    all_triangles = np.concatenate([triangles, triangles + len(nodes)])
+    return matplotlib.tri.Triangulation(all_nodes[:, 0], all_nodes[:, 1], all_triangles)
 
 
 def _nodal_values(expression, space):
-    """Interpolate a UFL expression into `space` and return its real nodal values."""
+    """Interpolate a UFL expression into `space` and return its real nodal values, mirrored."""
     out = dolfinx.fem.Function(space)
     out.interpolate(dolfinx.fem.Expression(expression, space.element.interpolation_points))
-    return out.x.array.real
+    return np.tile(out.x.array.real, 2)
 
 
 triangulation = _triangulation(field_space)
@@ -436,39 +395,51 @@ design_triangulation = _triangulation(Q)
 
 def draw_geometry(axis):
     """Outline the design slab and the focal spot, and crop to the physical region."""
-    axis.add_patch(
-        plt.Rectangle(
-            (DESIGN_BOX[0], DESIGN_BOX[2]),
-            DESIGN_BOX[1] - DESIGN_BOX[0],
-            DESIGN_BOX[3] - DESIGN_BOX[2],
-            fill=False,
-            edgecolor="red",
-            linewidth=0.8,
+    for xmin, xmax, _, ymax in (DESIGN_BOX, FOCUS_BOX):
+        axis.add_patch(
+            plt.Rectangle((xmin, -ymax), xmax - xmin, 2 * ymax, fill=False, edgecolor="red", linewidth=0.8)
         )
-    )
-    axis.add_patch(plt.Circle(FOCUS_CENTRE, FOCUS_RADIUS, fill=False, edgecolor="white", linewidth=0.8))
     axis.set_xlim(-X_PHYS, X_PHYS)
     axis.set_ylim(-Y_PHYS, Y_PHYS)
     axis.set_aspect("equal")
 
 
-def plot_state(figure=None):
-    """Draw the current design, its intensity and its real field into a three-panel figure.
+def plot_state(density, field, figure=None, cellwise=False):
+    """Plot a design, its intensity and the real part of its total field.
 
-    Reused by the optimizer callback and by the final figure, so the live preview and the saved
-    result cannot drift apart. Passing a `figure` redraws into it rather than opening another.
+    Set `cellwise` for a piecewise-constant (DG0) density, drawn with one colour per cell.
     """
     if figure is None:
         figure = plt.figure(figsize=(14, 4.5), layout="constrained")
     figure.clear()
     axes = figure.subplots(1, 3)
+    design_options = {"vmin": 0.0, "vmax": 1.0}
+    if cellwise:
+        design_values = None
+        cell_values = density.x.array[density.function_space.dofmap.list[:, 0]].real
+        design_options["facecolors"] = np.tile(np.repeat(cell_values, 2), 2)  # two triangles per cell, mirrored
+    else:
+        design_values = _nodal_values(density, Q)
     panels = (
-        (design_triangulation, _nodal_values(projected, Q), r"design $\bar\rho$", "binary", {"vmin": 0.0, "vmax": 1.0}),
-        (triangulation, _nodal_values(ufl.inner(total, total), field_space), r"$|E_\mathrm{tot}|^2$", "inferno", {}),
-        (triangulation, _nodal_values(ufl.real(total), field_space), r"$\mathrm{Re}(E_\mathrm{tot})$", "RdBu_r", {}),
+        (design_triangulation, design_values, r"design $\bar\rho$", "binary", design_options),
+        (
+            triangulation,
+            _nodal_values(ufl.inner(field, field), field_space),
+            r"$|E_\mathrm{tot}|^2$",
+            "inferno",
+            {"shading": "gouraud"},
+        ),
+        (
+            triangulation,
+            _nodal_values(ufl.real(field), field_space),
+            r"$\mathrm{Re}(E_\mathrm{tot})$",
+            "RdBu_r",
+            {"shading": "gouraud"},
+        ),
     )
     for axis, (tri, values, title, cmap, options) in zip(axes, panels):
-        mappable = axis.tripcolor(tri, values, cmap=cmap, **options)
+        positional = () if values is None else (values,)
+        mappable = axis.tripcolor(tri, *positional, cmap=cmap, **options)
         axis.set_title(title)
         figure.colorbar(mappable, ax=axis)
         draw_geometry(axis)
@@ -477,67 +448,21 @@ def plot_state(figure=None):
 
 # -
 
-# ## Choosing the optimizer
+# ## Optimization
 #
-# `scipy.optimize.minimize` drives a {py:class}`pyadjoint.reduced_functional_numpy.ReducedFunctionalNumPy`,
-# and two of its methods accept *both* bounds and curvature information: `L-BFGS-B`, which
-# builds its own approximate curvature from the gradients it has already seen, and
-# `trust-constr`, which takes exact Hessian-vector products through `hessp=` -- the method the
-# [elastic topology optimization demo](./topology_optimization) uses. Both are available here
-# (`METALENS_OPTIMIZER` selects between them), because the adjoint now supplies exact
-# Hessian-vector products under complex scalars; the rate-3 Taylor check above is the evidence
-# that they are the real thing.
-#
-# **Measured, on this problem: `L-BFGS-B` wins, and is what this demo keeps.** Same continuation
-# schedule, same 20-iteration budget per stage, one core:
-#
-# | method         | wall-clock | final enhancement | binarized | $M_\mathrm{nd}$ |
-# |----------------|-----------:|------------------:|----------:|-----------------:|
-# | `L-BFGS-B`     |     54.5 s |           13.2440 |    6.0860 |           0.2069 |
-# | `trust-constr` |    456.0 s |           11.4785 |    4.4132 |           0.5248 |
-#
-# Eight times the wall-clock for a worse design, and a markedly greyer one.
-#
-# The cost is *not* that a Hessian-vector product is expensive in itself. One costs 431 ms here
-# against a 217 ms gradient -- almost exactly the two linear solves it should be, a
-# tangent-linear solve plus a second-order-adjoint solve. What costs is how many
-# `trust-constr` asks for: its inner Steihaug-CG took about seven per outer iteration in this
-# run (147 products over 20 iterations), so one of its iterations costs some fifteen
-# gradient-equivalents where an `L-BFGS-B` iteration costs one.
-#
-# ```{admonition} Give the tangent-linear solve its own PETSc options
-# :class: tip
-# `tlm_petsc_options=PETSC_LU` above is not decoration. `petsc_options` and
-# `adjoint_petsc_options` do not imply it, so without it the tangent-linear solve falls back to
-# a default Krylov method -- on an indefinite Helmholtz operator, which is exactly the system
-# that needs a direct solver. That single omission cost a factor of **23** per Hessian-vector
-# product (9.7 s against 431 ms) and is invisible in the gradient, which never solves a
-# tangent-linear system. Anything that takes Hessian-vector products should set all three.
-# ```
-#
-# The design quality does not pay for the time either, and that is the more interesting half.
-# `trust-constr` was behind at *equal iteration count*, not merely slower. Projection
-# continuation moves the objective at every stage boundary, so curvature bought at one $\beta$
-# is spent by the next -- a penalty a quasi-Newton method pays far less of, since its secant
-# updates are discarded and rebuilt continuously anyway. The filtered design variables are also
-# weakly coupled, which is the regime a limited-memory secant update already handles well. The
-# comparison worth making for this problem class is against a method-of-moving-asymptotes
-# solver, not a second-order trust region.
-#
-# So the point of this section is not that curvature-aware optimization wins here. It is that
-# the choice is now available and measured, where before it was closed off.
-#
-# The density is bounded to $[0,1]$. There is nothing to pin: it lives on the design mesh and so
-# has no degrees of freedom outside the slab to begin with.
+# We use the method of moving asymptotes (MMA) from [`mmapy`](https://pypi.org/project/mmapy/),
+# the usual optimizer for density-based topology optimization. It only needs the objective and
+# its gradient, which `Jhat` provides, and handles the bounds $0 \le \rho \le 1$ directly. There
+# are no other constraints here (`m = 0`). The MMA history carries over from one $\beta$ stage to
+# the next: restarting it resets the asymptotes to their widest, and the resulting large steps
+# throw the sharply projected design out of its local optimum.
 #
 # ```{note}
-# The NumPy optimizer interface flattens the control into one array, so this loop is written
-# for serial execution, as the elastic topology optimization demo is.
+# The design vector is the owned degrees of freedom of `rho`, so this loop runs in serial.
 # ```
 
 # +
 num_owned = Q.dofmap.index_map.size_local * Q.dofmap.index_map_bs
-rf_np = pyadjoint.reduced_functional_numpy.ReducedFunctionalNumPy(Jhat)
 
 history: list[float] = []  # enhancement after each optimizer iteration
 stage_ends: list[int] = []  # index in `history` where each continuation stage finished
@@ -547,47 +472,76 @@ if LIVE_PREVIEW:
 preview = plt.figure(figsize=(14, 4.5), layout="constrained") if LIVE_PREVIEW else None
 
 
-def record_iterate(intermediate_result):
-    history.append(-intermediate_result.fun)
+def evaluate(design):
+    """Objective and gradient at the design vector `design`, as MMA column vectors."""
+    rho.x.array[:num_owned] = design.ravel()
+    rho.x.scatter_forward()
+    value = float(Jhat(rho))
+    gradient = Jhat.derivative()
+    return value, gradient.x.array[:num_owned].real.reshape(-1, 1)
+
+
+def record_iterate(value):
+    history.append(-value)
     if preview is not None:
-        plot_state(preview)
+        print(f"iteration {len(history)}, enhancement = {history[-1]:.4f}")
+        plot_state(projected, total, preview)
         plt.pause(0.01)
 
 
-OPTIMIZERS = {
-    "L-BFGS-B": {"options": {"maxiter": ITERATIONS_PER_STAGE, "maxcor": 20}},
-    "trust-constr": {
-        "hessp": lambda m, p: rf_np.hessian(p),
-        "options": {"maxiter": ITERATIONS_PER_STAGE, "gtol": 0.0, "xtol": 0.0},
-    },
-}
+n_design = num_owned
+m = 0  # no constraints besides the bounds
+lower, upper = np.zeros((n_design, 1)), np.ones((n_design, 1))
+a0, a, c, d = 1.0, np.zeros((m, 1)), np.ones((m, 1)), np.zeros((m, 1))
+no_constraints, no_constraint_gradients = np.zeros((m, 1)), np.zeros((m, n_design))
 
-start = time.perf_counter()
+design = rho.x.array[:num_owned].real.reshape(-1, 1).copy()
+previous, older = design.copy(), design.copy()
+asymptote_low, asymptote_upp = lower.copy(), upper.copy()
+
 for stage_beta in BETA_STAGES:
     beta.value = dolfinx.default_scalar_type(stage_beta)
-    result = scipy.optimize.minimize(
-        rf_np.__call__,
-        rf_np.get_controls(),
-        jac=lambda m: rf_np.derivative(),
-        method=OPTIMIZER,
-        bounds=scipy.optimize.Bounds(0.0, 1.0),
-        callback=record_iterate,
-        **OPTIMIZERS[OPTIMIZER],
-    )
-    rho.x.array[:num_owned] = result.x
-    rho.x.scatter_forward()
-    stage_ends.append(len(history))
-    print(f"beta = {stage_beta:5.1f}: enhancement {-result.fun:8.4f} after {result.nit} iterations")
 
-print(f"optimization took {time.perf_counter() - start:.1f} s")
+    for _ in range(ITERATIONS_PER_STAGE):
+        value, gradient = evaluate(design)
+        record_iterate(value)
+        updated, *_, asymptote_low, asymptote_upp = mmapy.mmasub(
+            m,
+            n_design,
+            len(history),
+            design,
+            lower,
+            upper,
+            previous,
+            older,
+            value,
+            gradient,
+            no_constraints,
+            no_constraint_gradients,
+            asymptote_low,
+            asymptote_upp,
+            a0,
+            a,
+            c,
+            d,
+            move=MMA_MOVE,
+        )
+        design, previous, older = updated, design, previous
+
+    stage_ends.append(len(history))
+    print(f"beta = {stage_beta:5.1f}: enhancement {history[-1]:8.4f}")
+
+rho.x.array[:num_owned] = design.ravel()
+rho.x.scatter_forward()
 # -
 
 # ## Binarization
 #
-# Continuation drives the *projected* density towards 0/1, which the measure of
-# non-discreteness $M_\mathrm{nd} = \frac{4}{|\Omega_d|}\int_{\Omega_d}\bar\rho(1-\bar\rho)$
-# quantifies: 1 for an all-grey design, 0 for a fully binary one. Thresholding the design at
-# $\rho = 0.5$ and re-evaluating shows what that grey was still buying.
+# The measure of non-discreteness
+# $M_\mathrm{nd} = \frac{4}{|\Omega_d|}\int_{\Omega_d}\bar\rho(1-\bar\rho)~\mathrm{d}x$ is 1 for
+# an all-grey design and 0 for a binary one. To get a manufacturable design we threshold the
+# filtered and projected density $\bar\rho$ at 0.5, cell by cell (DG0), and solve the Helmholtz
+# problem once more with the resulting two-material permittivity.
 
 # +
 with pyadjoint.stop_annotating():
@@ -596,9 +550,29 @@ with pyadjoint.stop_annotating():
         dolfinx_adjoint.assemble_scalar(4.0 * projected * (1.0 - projected) * dx_design, annotate=False) / design_area
     )
 
-    binary = dolfinx_adjoint.Function(Q, name="binarized_density")
-    binary.x.array[:] = (rho.x.array.real > 0.5).astype(float)
-    binarized = -Jhat(binary)
+    Q0 = dolfinx.fem.functionspace(design_mesh, ("Discontinuous Lagrange", 0))
+    binary = dolfinx.fem.Function(Q0, name="binarized_density")
+    binary.interpolate(dolfinx.fem.Expression(projected, Q0.element.interpolation_points))
+    binary.x.array[:] = binary.x.array.real > 0.5
+    binary.x.scatter_forward()
+
+    scattered_binary = dolfinx.fem.Function(V, name="binarized_scattered_field")
+    a_binary, L_binary = helmholtz_forms(1.0 + binary * (EPS_MATERIAL - 1.0))
+    dolfinx.fem.petsc.LinearProblem(
+        a_binary,
+        L_binary,
+        petsc_options_prefix="metalens_binary_",
+        u=scattered_binary,
+        bcs=[bc],
+        petsc_options=PETSC_LU,
+        entity_maps=[design_to_parent],
+    ).solve()
+
+    total_binary = scattered_binary + incident
+    binarized = (
+        dolfinx_adjoint.assemble_scalar(ufl.inner(total_binary, total_binary) * dx(FOCUS_TAG), annotate=False)
+        / focus_area
+    )
 
 print(f"measure of non-discreteness: {non_discreteness:.4f}")
 print(f"enhancement, continuous design: {continuous:.4f}")
@@ -607,14 +581,20 @@ print(f"enhancement, binarized design:  {binarized:.4f}")
 
 # ## Results
 #
-# The optimized design, the intensity it produces and the real part of the field it focuses.
-# Both fields are quadratic, so they are sampled into a linear space on the same mesh for
-# plotting; the design is drawn on the design mesh it lives on.
+# The optimized design, the intensity it produces and the real part of the total field.
 
 # +
-Jhat(rho)  # re-evaluate, so the tape holds the optimized design rather than the binarized one
-figure = plot_state()
-figure.savefig("metalens_design_and_field.png", dpi=150)
+Jhat(rho)
+figure = plot_state(projected, total)
+figure.suptitle(f"continuous design, enhancement {continuous:.4f}")
+plt.show()
+# -
+
+# The same for the binarized design.
+
+# +
+figure = plot_state(binary, total_binary, cellwise=True)
+figure.suptitle(f"binarized design, enhancement {binarized:.4f}")
 plt.show()
 # -
 
@@ -638,6 +618,5 @@ axis.set_xlabel("optimizer iteration")
 axis.set_ylabel("intensity enhancement at the focus")
 axis.set_title("Metalens topology optimization")
 axis.grid(alpha=0.3)
-figure.savefig("metalens_convergence.png", dpi=150)
 plt.show()
 # -
