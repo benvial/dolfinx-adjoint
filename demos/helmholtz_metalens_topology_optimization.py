@@ -119,9 +119,7 @@ except ImportError:
 # -
 
 if not np.issubdtype(dolfinx.default_scalar_type, np.complexfloating):
-    raise RuntimeError(
-        "This demo needs a complex-scalar DOLFINx build."
-    )
+    raise RuntimeError("This demo needs a complex-scalar DOLFINx build.")
 
 # ## Parameters
 #
@@ -396,9 +394,7 @@ design_triangulation = _triangulation(Q)
 def draw_geometry(axis):
     """Outline the design slab and the focal spot, and crop to the physical region."""
     for xmin, xmax, _, ymax in (DESIGN_BOX, FOCUS_BOX):
-        axis.add_patch(
-            plt.Rectangle((xmin, -ymax), xmax - xmin, 2 * ymax, fill=False, edgecolor="red", linewidth=0.8)
-        )
+        axis.add_patch(plt.Rectangle((xmin, -ymax), xmax - xmin, 2 * ymax, fill=False, edgecolor="red", linewidth=0.8))
     axis.set_xlim(-X_PHYS, X_PHYS)
     axis.set_ylim(-Y_PHYS, Y_PHYS)
     axis.set_aspect("equal")
