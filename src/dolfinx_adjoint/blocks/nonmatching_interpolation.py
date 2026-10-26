@@ -1,21 +1,10 @@
 import dolfinx
+from fenicsx_compat import require_module
 from pyadjoint import Block
 from pyadjoint.tape import stop_annotating
 
 from ..types.function import _create_function
 from .interpolation import _MatrixCSRWorkspace, get_mult
-
-
-def _import_fenicsx_ii():
-    """Lazy import of fenicsx_ii to avoid strict dependencies."""
-    try:
-        import fenicsx_ii
-    except ImportError as e:
-        raise ImportError(
-            "The 'fenicsx_ii' package is required for non-matching interpolation. "
-            "Please install it using 'pip install fenicsx_ii'."
-        ) from e
-    return fenicsx_ii
 
 
 class NonmatchingInterpolationBlock(Block):
@@ -64,7 +53,7 @@ class NonmatchingInterpolationBlock(Block):
     def _get_interpolation_matrix(self):
         if self._matrix_workspace is None:
             # We import fenicsx_ii lazily to avoid strict dependencies
-            fenicsx_ii = _import_fenicsx_ii()
+            fenicsx_ii = require_module("fenicsx_ii")
 
             # Use provided reduction operator or default to PointEvaluationOperator
             red_op = self._red_op

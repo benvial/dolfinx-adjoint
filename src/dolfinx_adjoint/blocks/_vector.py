@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dolfinx
+import fenicsx_compat
 import numpy as np
 import numpy.typing as npt
 
@@ -80,14 +81,10 @@ def _vector(
     Returns:
         A distributed vector.
     """
-    # Delegate to `dolfinx.la.vector` rather than reaching for the nanobind
-    # `dolfinx.cpp.la.Vector_*` constructors. Within a DOLFINx release the index
-    # map accessors and this factory agree on whether an index map is the raw
-    # C++ object (0.11.0) or the Python wrapper (0.12, FEniCS/dolfinx#4496);
-    # constructing by hand picks one side of that contract and breaks on the
-    # other. `dtype` must stay keyword -- it is keyword-only from 0.12 -- and
-    # `scatterer` must not be passed, as 0.11.0 has no such parameter.
-    vec = dolfinx.la.vector(map, bs, dtype=dtype)  # type: ignore
+    # Not the nanobind `dolfinx.cpp.la.Vector_*` constructors: whether an index map is
+    # the raw C++ object or the Python wrapper changed in 0.12 (FEniCS/dolfinx#4496),
+    # and only `dolfinx.la.vector` follows it. fenicsx_compat.vector documents the rest.
+    vec = fenicsx_compat.vector(map, bs, dtype=dtype)
     return _SpecialVector(vec, function_space)
 
 

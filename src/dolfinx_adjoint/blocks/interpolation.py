@@ -8,29 +8,16 @@ import dolfinx
 import dolfinx.fem.petsc
 import numpy as np
 import ufl
+from fenicsx_compat import require_module
 from pyadjoint import Block, OverloadedType
 from pyadjoint.tape import stop_annotating
 from ufl.algorithms.analysis import traverse_unique_terminals
 
-from ..compat import get_interpolation_points
 from ..types.function import Function, _create_function
 from ..utils import unroll_dofmap
 
 if typing.TYPE_CHECKING:
     from petsc4py import PETSc
-
-
-def _import_scifem():
-    """Import scifem lazily: only ExprInterpolationBlock needs it, so importing
-    dolfinx_adjoint (or using InterpolationBlock) must not require it to be installed.
-    Replace with lazy import once we are at 3.15:
-    https://peps.python.org/pep-0810/
-    """
-    try:
-        import scifem
-    except ImportError as e:
-        raise ImportError("scifem is required to interpolate a UFL expression: pip install scifem") from e
-    return scifem
 
 
 # Cache of assembled interpolation matrices, keyed by (id(space_from), id(space_to),
@@ -377,7 +364,7 @@ class ExprInterpolationBlock(Block):
         if dE_total is None:
             return None
         else:
-            return dolfinx.fem.Expression(dE_total, get_interpolation_points(self.space_to))
+            return dolfinx.fem.Expression(dE_total, self.space_to.element.interpolation_points)
 
     def evaluate_tlm_component(self, inputs, tlm_inputs, block_variable, idx, prepared=None):
         if self._tlm_output is None:
@@ -498,7 +485,7 @@ class ExprInterpolationBlock(Block):
         # InterpolationBlock.recompute_component and FunctionAssignBlock's convention.
         output = block_variable.saved_output
         with stop_annotating():
-            compiled_expr = dolfinx.fem.Expression(updated_expr, get_interpolation_points(self.space_to))
+            compiled_expr = dolfinx.fem.Expression(updated_expr, self.space_to.element.interpolation_points)
             output.interpolate(compiled_expr)
             output.x.scatter_forward()
 
@@ -520,7 +507,9 @@ class MatrixFreeInterpolationOperator:
         V_dofmap = unroll_dofmap(space_from.dofmap.list, space_from.dofmap.bs)
 
         # Get raw cell-local interpolation data from scifem
-        scifem = _import_scifem()
+        # Imported here: only ExprInterpolationBlock needs scifem, so importing
+        # dolfinx_adjoint must not. Replace with a PEP 810 lazy import from 3.15.
+        scifem = require_module("scifem")
         raw_data = scifem.prepare_interpolation_data(expr, space_to)
 
         num_cells = space_to.mesh.topology.index_map(space_to.mesh.topology.dim).size_local

@@ -5,8 +5,7 @@ import typing
 from petsc4py import PETSc
 
 import dolfinx.fem.petsc
-
-from .compat import bcs_by_block
+from fenicsx_compat import bcs_by_block, ghost_update
 
 
 def solve_linear_problem(
@@ -149,6 +148,6 @@ class HomogeneousBCLinearProblem(dolfinx.fem.petsc.LinearProblem):
         self._b.ghostUpdate(addv=PETSc.InsertMode.INSERT, mode=PETSc.ScatterMode.FORWARD)  # type: ignore
         # Solve linear system and update ghost values in the solution
         self._solver.solve(self._b, self._x)
-        dolfinx.la.petsc._ghost_update(self._x, PETSc.InsertMode.INSERT, PETSc.ScatterMode.FORWARD)  # type: ignore
+        ghost_update(self._x, PETSc.InsertMode.INSERT, PETSc.ScatterMode.FORWARD)
         dolfinx.fem.petsc.assign(self._x, self._u)  # type: ignore
         return self._u

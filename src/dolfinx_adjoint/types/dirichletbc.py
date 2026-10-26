@@ -8,7 +8,6 @@ from pyadjoint.tape import get_working_tape, stop_annotating
 
 from ..blocks.dirichletbc import DirichletBCBlock, build_cpp_bc_and_kwargs
 from ..blocks.interpolation import ExprInterpolationBlock
-from ..compat import get_interpolation_points
 from .function import Function
 
 
@@ -29,7 +28,7 @@ def _pack_bc_value(g, V: dolfinx.fem.FunctionSpace, annotate: bool) -> Function:
     expr = ufl.as_ufl(g)
     with stop_annotating():
         v = dolfinx.fem.Function(V)
-        v.interpolate(dolfinx.fem.Expression(expr, get_interpolation_points(V)))
+        v.interpolate(dolfinx.fem.Expression(expr, V.element.interpolation_points))
         v.x.scatter_forward()
 
     output = create_overloaded_object(v)
@@ -91,7 +90,7 @@ class DirichletBC(dolfinx.fem.DirichletBC, FloatingType):
         # ``function_space`` is deliberately *not* overridden the same way: 0.11's own
         # bcs_by_block and assemble_matrix read ``bc.function_space`` expecting the cpp
         # space, so forcing the Python wrapper there would break dolfinx's internals.
-        # dolfinx_adjoint.compat.bcs_by_block normalises both flavours instead.
+        # fenicsx_compat.bcs_by_block normalises both flavours instead.
         self._packed_g = g_packed
 
         FloatingType.__init__(
