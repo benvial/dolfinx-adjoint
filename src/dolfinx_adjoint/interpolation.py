@@ -8,7 +8,6 @@ from pyadjoint.tape import annotate_tape, get_working_tape, stop_annotating
 
 from .blocks.interpolation import ExprInterpolationBlock, InterpolationBlock
 from .blocks.nonmatching_interpolation import NonmatchingInterpolationBlock
-from .compat import get_interpolation_points
 
 
 def interpolate(u_or_expr, V: dolfinx.fem.FunctionSpace, **kwargs):
@@ -24,7 +23,7 @@ def interpolate(u_or_expr, V: dolfinx.fem.FunctionSpace, **kwargs):
         if isinstance(u_or_expr, dolfinx.fem.Function):
             v.interpolate(u_or_expr)
         elif isinstance(u_or_expr, ufl.core.expr.Expr):
-            ip = get_interpolation_points(V)
+            ip = V.element.interpolation_points
             compiled_expr = dolfinx.fem.Expression(u_or_expr, ip)
             v.interpolate(compiled_expr)
         else:

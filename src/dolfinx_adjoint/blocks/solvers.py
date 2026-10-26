@@ -12,8 +12,8 @@ import dolfinx.fem.petsc
 import numpy as np
 import pyadjoint
 import ufl
+from fenicsx_compat import bcs_by_block, ghost_update
 
-from ..compat import bcs_by_block
 from ..types import Function
 from ..typing_utils import MaybeBlocked, MaybeBlockedMatrix, NestedSequence
 from ..ufl_utils import assign_mixed_parts, sum_form
@@ -389,7 +389,7 @@ class _ProblemBlockBase(pyadjoint.Block, abc.ABC):
             seed.x.array[:] = tlm_value.x.array[:]
             seed.x.scatter_forward()
             dolfinx.fem.petsc.assemble_vector(b_petsc, template)
-        dolfinx.la.petsc._ghost_update(b_petsc, PETSc.InsertMode.ADD, PETSc.ScatterMode.REVERSE)  # type: ignore[arg-type]
+        ghost_update(b_petsc, PETSc.InsertMode.ADD, PETSc.ScatterMode.REVERSE)
 
         # 4. Solve the full monolithic TLM system. The solver's own solution
         # storage is shared across every block, so copy the result out into
@@ -840,7 +840,7 @@ class _ProblemBlockBase(pyadjoint.Block, abc.ABC):
                 seed.x.array[:] = tlm_input.x.array[:]
                 seed.x.scatter_forward()
                 dolfinx.fem.petsc.assemble_vector(b, template)
-            dolfinx.la.petsc._ghost_update(b, PETSc.InsertMode.ADD, PETSc.ScatterMode.REVERSE)
+            ghost_update(b, PETSc.InsertMode.ADD, PETSc.ScatterMode.REVERSE)
             b.scale(-1)
 
             with b.localForm() as b_loc:
@@ -1200,8 +1200,8 @@ class LinearProblemBlock(_ProblemBlockBase):
         # Which output block each bc constrains, for evaluate_adj_component/
         # evaluate_hessian_component's DirichletBC branch to index into the
         # (possibly per-block) boundary reaction with -- computed once here, since a
-        # bc's block assignment is static for this Block's lifetime. Reuses dolfinx's
-        # own bcs_by_block rather than a hand-rolled containment check, matching the
+        # bc's block assignment is static for this Block's lifetime. Reuses
+        # fenicsx_compat.bcs_by_block rather than a hand-rolled containment check, matching the
         # grouping HomogeneousBCLinearProblem.solve() already relies on.
         self._bc_block_index: dict[dolfinx.fem.DirichletBC, int] = {}
         if isinstance(self._u, list) and self._bcs:
@@ -1436,8 +1436,8 @@ class NonlinearProblemBlock(_ProblemBlockBase):
         # Which output block each bc constrains, for evaluate_adj_component/
         # evaluate_hessian_component's DirichletBC branch to index into the
         # (possibly per-block) boundary reaction with -- computed once here, since a
-        # bc's block assignment is static for this Block's lifetime. Reuses dolfinx's
-        # own bcs_by_block rather than a hand-rolled containment check, matching the
+        # bc's block assignment is static for this Block's lifetime. Reuses
+        # fenicsx_compat.bcs_by_block rather than a hand-rolled containment check, matching the
         # grouping HomogeneousBCLinearProblem.solve() already relies on.
         self._bc_block_index: dict[dolfinx.fem.DirichletBC, int] = {}
         if isinstance(self._u, list) and self._bcs:

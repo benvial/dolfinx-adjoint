@@ -15,6 +15,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
       "fenics-dolfinx>=0.11.0",
+      # 0.4.0 for dirichletbc_init_kwargs.
+      "fenicsx-compat>=0.4.0",
       "pyadjoint-ad>=2026.9.0",
       "packaging>=24.2",
       # Storage for checkpoint schedules that keep state on disk. Build it against MPI to get

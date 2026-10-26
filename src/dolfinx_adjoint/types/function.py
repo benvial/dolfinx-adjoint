@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import typing
 
-import basix.ufl
 import dolfinx
 import numpy
 import numpy.typing as npt
 import ufl
+from fenicsx_compat import real_functionspace
 from pyadjoint.overloaded_type import (
     FloatingType,
     create_overloaded_object,
@@ -297,10 +297,6 @@ class Constant(Function):
         the constant is stored in the underlying vector of the function, and the class
         provides a property to access this value conveniently.
 
-        If {py:func}`basix.ufl.real_element` is not available, the class will attempt to use
-        {py:mod}`scifem` to create a function space for the constant (which would then require
-        {py:mod}`scifem` to be installed - :code:`pip install scifem`).
-
     """
 
     def __init__(
@@ -312,18 +308,7 @@ class Constant(Function):
     ):
         self._ufl_id = self._init_ufl_id(ufl_id)
 
-        value_shape = numpy.shape(c)
-        try:
-            el = basix.ufl.real_element(domain.basix_cell(), value_shape=numpy.shape(c))
-            V = dolfinx.fem.functionspace(domain, el)
-
-        except AttributeError:
-            try:
-                import scifem
-            except ImportError as e:
-                raise ImportError("scifem is required to use Constant: pip install scifem") from e
-
-            V = scifem.create_real_functionspace(domain, value_shape=value_shape)
+        V = real_functionspace(domain, value_shape=numpy.shape(c))
         super().__init__(V, name=name)
         self.x.array[:] = c
 
