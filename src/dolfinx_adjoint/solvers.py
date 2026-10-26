@@ -1180,17 +1180,25 @@ class NonlinearProblem(_ProblemBase, dolfinx.fem.petsc.NonlinearProblem):
     def bcs(self) -> typing.Sequence[dolfinx.fem.DirichletBC]:
         """Dirichlet boundary conditions applied to the residual and Jacobian.
 
-        {py:class}`dolfinx.fem.petsc.NonlinearProblem` has no ``bcs`` attribute of its
-        own (its SNES callbacks close over a fixed ``bcs`` list at construction); this
-        property exposes ``self._bcs`` under the same name {py:class}`~dolfinx_adjoint.LinearProblem` uses (there, it is
-        the base class's own attribute), so {py:class}`~dolfinx_adjoint.solvers._ProblemBase`'s shared methods
+        On dolfinx 0.11 {py:class}`dolfinx.fem.petsc.NonlinearProblem` has no ``bcs``
+        attribute of its own (its SNES callbacks close over a fixed ``bcs`` list at
+        construction); this property exposes ``self._bcs`` under the same name
+        {py:class}`~dolfinx_adjoint.LinearProblem` uses (there, it is the base class's own
+        attribute), so {py:class}`~dolfinx_adjoint.solvers._ProblemBase`'s shared methods
         can read/write ``self.bcs`` uniformly across both classes.
         """
         return self._bcs
 
     @bcs.setter
     def bcs(self, value: typing.Sequence[dolfinx.fem.DirichletBC]) -> None:
-        self._bcs = value
+        # From dolfinx 0.12 the base class has a ``bcs`` property whose setter registers
+        # both SNES callbacks, and its __init__ relies on that assignment to do so.
+        # Overriding it here would leave the SNES without a residual, so defer to it.
+        base_bcs = getattr(dolfinx.fem.petsc.NonlinearProblem, "bcs", None)
+        if isinstance(base_bcs, property):
+            base_bcs.__set__(self, value)
+        else:
+            self._bcs = value
 
     def _get_or_build_residual_template(
         self,
