@@ -1,7 +1,7 @@
 import dolfinx
 import numpy as np
 import numpy.typing as npt
-from packaging.version import Version
+from fenicsx_compat import dirichletbc_init_kwargs
 from pyadjoint.block import Block
 
 
@@ -61,13 +61,7 @@ def build_cpp_bc_and_kwargs(
     else:
         raise NotImplementedError(f"Type {dtype} not supported.")
 
-    bc_kwargs: dict = {}
-    # If dolfinx-version is 0.12 we need to pass the following
-    # due to https://github.com/FEniCS/dolfinx/pull/4342/
-    if Version(dolfinx.__version__).minor > 11:
-        bc_kwargs["V"] = V_used
-        bc_kwargs["g"] = g
-    return cpp_bc, bc_kwargs
+    return cpp_bc, dirichletbc_init_kwargs(V_used, g)
 
 
 class DirichletBCBlock(Block):
