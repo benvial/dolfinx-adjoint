@@ -246,11 +246,7 @@ class _ProblemBase(abc.ABC):
         Returns:
             ``owner``, so this can wrap a return value in place.
         """
-        self_refs = getattr(owner, "_dxa_problems", None)
-        if self_refs is None:
-            self_refs = []
-            owner._dxa_problems = self_refs
-        self_refs.append(self)
+        vars(owner).setdefault("_dxa_problems", []).append(self)
         return owner
 
     @property

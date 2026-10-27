@@ -54,21 +54,24 @@ def _assemble_scalar_value(
     Returns:
         The reduced, real-valued scalar.
     """
+    compiled_form: dolfinx.fem.Form
     if isinstance(form, ufl.Form):
-        form = _compile_form(
+        compiled_form = _compile_form(
             form,
             jit_options=jit_options,
             form_compiler_options=form_compiler_options,
             entity_maps=entity_maps,
         )
-    local_output = dolfinx.fem.assemble_scalar(form)
-    output = form.mesh.comm.allreduce(local_output, op=MPI.SUM)
+    else:
+        compiled_form = form
+    local_output = dolfinx.fem.assemble_scalar(compiled_form)
+    output = compiled_form.mesh.comm.allreduce(local_output, op=MPI.SUM)
     # See this function's docstring: J := Re(assemble(form)), unconditionally.
     return float(numpy.real(output))
 
 
 def _assemble_rank1_form(
-    form: ufl.Form,
+    form: ufl.BaseForm,
     space: dolfinx.fem.FunctionSpace | None = None,
     jit_options: dict | None = None,
     form_compiler_options: dict | None = None,
@@ -132,6 +135,7 @@ def _assemble_wirtinger_seed(
     Returns:
         The assembled seed.
     """
+    dform: ufl.BaseForm
     dform, dform_imaginary_direction = _wirtinger_derivative_forms(form, coefficient, argument)
     assert isinstance(dform, ufl.Form), "dform must be a UFL form."
     if dform.empty():

@@ -21,6 +21,12 @@ from ..checkpointing import SnapshotCheckpoint, maybe_disk_checkpoint
 from ..utils import _compile_form, function_from_vector, gather
 
 
+@typing.overload
+def _extract_real_parameter_gradient(value: dolfinx.la.Vector, V: dolfinx.fem.FunctionSpace) -> dolfinx.la.Vector: ...
+@typing.overload
+def _extract_real_parameter_gradient(
+    value: typing.Union[numpy.number, complex], V: None = None
+) -> typing.Union[numpy.number, complex]: ...
 def _extract_real_parameter_gradient(
     value: typing.Union[dolfinx.la.Vector, numpy.number, complex],
     V: dolfinx.fem.FunctionSpace | None = None,

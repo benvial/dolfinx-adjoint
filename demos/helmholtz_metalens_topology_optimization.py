@@ -496,7 +496,7 @@ previous, older = design.copy(), design.copy()
 asymptote_low, asymptote_upp = lower.copy(), upper.copy()
 
 for stage_beta in BETA_STAGES:
-    beta.value = dolfinx.default_scalar_type(stage_beta)
+    beta.value[...] = stage_beta
 
     for _ in range(ITERATIONS_PER_STAGE):
         value, gradient = evaluate(design)

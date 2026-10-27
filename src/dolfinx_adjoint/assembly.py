@@ -55,6 +55,7 @@ def assemble_scalar(form: typing.Union[ufl.Form, dolfinx.fem.Form], **kwargs):
     output = create_overloaded_object(output)
 
     if annotate:
+        assert isinstance(form, ufl.Form)  # A compiled form was refused above.
         block = AssembleBlock(form, ad_block_tag=ad_block_tag)
 
         tape = get_working_tape()
