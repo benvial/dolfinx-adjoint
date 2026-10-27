@@ -5,6 +5,7 @@ import typing
 import ufl
 from ufl.algorithms.check_arities import ArityChecker, ArityMismatch
 from ufl.algorithms.map_integrands import map_integrands
+from ufl.corealg.dag_traverser import DAGTraverser
 from ufl.corealg.map_dag import map_expr_dag
 
 from .compat import compute_form_adjoint
@@ -261,7 +262,9 @@ def _argument_conjugation(expression: ufl.core.expr.Expr, argument: ufl.Argument
             expression adds a conjugated occurrence to a bare one, so that no single answer
             describes the expression.
     """
-    arities = map_expr_dag(ArityChecker((argument,)), expression, compress=False)
+    rules = ArityChecker((argument,))
+    # UFL 2026.2 made ArityChecker a DAGTraverser, which is called directly.
+    arities = rules(expression) if isinstance(rules, DAGTraverser) else map_expr_dag(rules, expression, compress=False)
     conjugations = {conjugated for arg, conjugated in arities if arg.number() == argument.number()}
     if not conjugations:
         return None
